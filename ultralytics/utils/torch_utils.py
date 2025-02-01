@@ -5,6 +5,7 @@ import math
 import os
 import random
 import time
+import re
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import datetime
@@ -300,11 +301,13 @@ def fuse_deconv_and_bn(deconv, bn):
     return fuseddconv
 
 
-def model_info(model, detailed=False, verbose=True, imgsz=640):
+def model_info(model, cfg, detailed=False, verbose=True, imgsz=640):
     """Print and return detailed model information layer by layer."""
     if not verbose:
         return
     n_p = get_num_params(model)  # number of parameters
+    if cfg is not None:
+        b_n_p = get_backbone_num_params(model, cfg["backbone"])
     n_g = get_num_gradients(model)  # number of gradients
     n_l = len(list(model.modules()))  # number of layers
     if detailed:
@@ -321,7 +324,11 @@ def model_info(model, detailed=False, verbose=True, imgsz=640):
     fs = f", {flops:.1f} GFLOPs" if flops else ""
     yaml_file = getattr(model, "yaml_file", "") or getattr(model, "yaml", {}).get("yaml_file", "")
     model_name = Path(yaml_file).stem.replace("yolo", "YOLO") or "Model"
-    LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
+    if cfg is not None:
+        LOGGER.info(f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters({b_n_p:,} parameters in backbone), {n_g:,} gradients{fs}")
+    else:
+        LOGGER.info(
+            f"{model_name} summary{fused}: {n_l:,} layers, {n_p:,} parameters, {n_g:,} gradients{fs}")
     return n_l, n_p, n_g, flops
 
 
@@ -329,6 +336,16 @@ def get_num_params(model):
     """Return the total number of parameters in a YOLO model."""
     return sum(x.numel() for x in model.parameters())
 
+def get_backbone_num_params(model, backbone_cfg):
+    len_backbone = len(backbone_cfg) - 1
+    n_p = 0
+    pattern = r'model\.(\d+)\.'
+    for x,y in model.named_parameters():
+        if int(re.search(pattern, x).group(1)) <= len_backbone:
+            n_p += y.numel()
+        else:
+            break
+    return n_p
 
 def get_num_gradients(model):
     """Return the total number of parameters with gradients in a YOLO model."""

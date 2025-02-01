@@ -56,6 +56,11 @@ from .block import (
     RepVGGDW,
     ResNetLayer,
     SCDown,
+    MV2Block,
+    MobileViTBlock,
+    SEAM,
+    MultiSEAM,
+    MobileViTBlockv2
 )
 from .conv import (
     CBAM,
@@ -156,4 +161,8 @@ __all__ = (
     "C2fCIB",
     "Attention",
     "PSA",
+    "MV2Block",
+    "MobileViTBlock",
+    "SEAM",
+    'MultiSEAM'
 )

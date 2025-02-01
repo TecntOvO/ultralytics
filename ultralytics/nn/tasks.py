@@ -61,6 +61,11 @@ from ultralytics.nn.modules import (
     Segment,
     WorldDetect,
     v10Detect,
+    MV2Block,
+    MobileViTBlock,
+    SEAM,
+    MultiSEAM,
+    MobileViTBlockv2
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -111,7 +116,7 @@ class BaseModel(nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, augment=False, embed=None, score_visualize=False):
         """
         Perform a forward pass through the network.
 
@@ -127,9 +132,9 @@ class BaseModel(nn.Module):
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, profile, visualize, embed, score_visualize)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, profile=False, visualize=False, embed=None, score_visualize=False):
         """
         Perform a forward pass through the network.
 
@@ -143,12 +148,19 @@ class BaseModel(nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+        scores = []
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+
+            if (m.type == 'ultralytics.nn.modules.block.MobileViTBlockv2' and
+                    score_visualize and x.shape[0] == 1):
+                x, score = m(x, True)
+                scores.append([score])
+            else:
+                x = m(x)
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
@@ -156,7 +168,10 @@ class BaseModel(nn.Module):
                 embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x
+        if score_visualize:
+            return x, scores
+        else:
+            return x
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -234,16 +249,17 @@ class BaseModel(nn.Module):
         bn = tuple(v for k, v in nn.__dict__.items() if "Norm" in k)  # normalization layers, i.e. BatchNorm2d()
         return sum(isinstance(v, bn) for v in self.modules()) < thresh  # True if < 'thresh' BatchNorm layers in model
 
-    def info(self, detailed=False, verbose=True, imgsz=640):
+    def info(self, cfg=None, detailed=False, verbose=True, imgsz=640):
         """
         Prints model information.
 
         Args:
+            cfg(dict): model cfg description
             detailed (bool): if True, prints out detailed information about the model. Defaults to False
             verbose (bool): if True, prints out the model information. Defaults to False
             imgsz (int): the size of the image that the model will be trained on. Defaults to 640
         """
-        return model_info(self, detailed=detailed, verbose=verbose, imgsz=imgsz)
+        return model_info(self, cfg, detailed=detailed, verbose=verbose, imgsz=imgsz)
 
     def _apply(self, fn):
         """
@@ -324,7 +340,7 @@ class DetectionModel(BaseModel):
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
+            s = 512  # 2x min stride
             m.inplace = self.inplace
 
             def _forward(x):
@@ -342,7 +358,7 @@ class DetectionModel(BaseModel):
         # Init weights, biases
         initialize_weights(self)
         if verbose:
-            self.info()
+            self.info(cfg)
             LOGGER.info("")
 
     def _predict_augment(self, x):
@@ -940,6 +956,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     max_channels = float("inf")
     nc, act, scales = (d.get(x) for x in ("nc", "activation", "scales"))
     depth, width, kpt_shape = (d.get(x, 1.0) for x in ("depth_multiple", "width_multiple", "kpt_shape"))
+    scale = None
     if scales:
         scale = d.get("scale")
         if not scale:
@@ -955,6 +972,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
     if verbose:
         LOGGER.info(f"\n{'':>3}{'from':>20}{'n':>3}{'params':>10}  {'module':<45}{'arguments':<30}")
     ch = [ch]
+    # save是用来保存一些在后面层中需要用到的前面层的输出下设定的（比如FAN层）
     layers, save, c2 = [], [], ch[-1]  # layers, savelist, ch out
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = getattr(torch.nn, m[3:]) if "nn." in m else globals()[m]  # get module
@@ -997,6 +1015,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             PSA,
             SCDown,
             C2fCIB,
+            SEAM,
+            MultiSEAM,
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1028,8 +1048,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 n = 1
             if m is C3k2:  # for M/L/X sizes
                 legacy = False
-                if scale in "mlx":
-                    args[3] = True
+                if scale is not None:
+                    if scale in "mlx":
+                        args[3] = True
         elif m is AIFI:
             args = [ch[f], *args]
         elif m in {HGStem, HGBlock}:
@@ -1058,6 +1079,20 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [c1, c2, *args[1:]]
         elif m is CBFuse:
             c2 = ch[f[-1]]
+        elif m is MV2Block:
+            c1, c2 = ch[f], args[0]
+            c2 = make_divisible(min(c2, max_channels) * width, divisor=8)
+            args = [c1, c2, *args[1:]]
+        elif m is MobileViTBlock:
+            dim, d_c = args[0], ch[f]
+            if d_c != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
+                d_c = make_divisible(min(d_c, max_channels) * width, 8)
+            args = [dim, args[1], d_c, *args[2:]]
+        elif m is MobileViTBlockv2:
+            dim, channel, hid_dim = args[0], ch[f], args[2]
+            dim = make_divisible(dim * width, divisor=8)
+            hid_dim = make_divisible(hid_dim * width, divisor=8)
+            args = [dim, args[1], channel, hid_dim, *args[3:]]
         else:
             c2 = ch[f]
 
