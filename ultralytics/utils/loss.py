@@ -13,6 +13,7 @@ from .metrics import bbox_iou, probiou, bbox_inner_iou
 from .tal import bbox2dist
 
 
+
 class VarifocalLoss(nn.Module):
     """
     Varifocal loss by Zhang et al.
@@ -88,10 +89,11 @@ class DFLoss(nn.Module):
         ).mean(-1, keepdim=True)
 
 
+
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
+    def                                                                                                       __init__(self, reg_max=16):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
@@ -208,22 +210,33 @@ class v8DetectionLoss:
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+
+        # 将多尺度特征图 feats 的预测结果拆分为 pred_distri（边界框分布）和 pred_scores（类别分数）
         feats = preds[1] if isinstance(preds, tuple) else preds
+        # pred_distri --> [batch_size, 4*reg_max, num_anchors]
+        # pred_scores --> [batch_size, num_classes, num_anchors]
         pred_distri, pred_scores = torch.cat([xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2).split(
             (self.reg_max * 4, self.nc), 1
         )
-
+        # pred_distri --> [batch_size, num_anchors, 4*reg_max]
+        # pred_scores --> [batch_size, num_anchors, num_classes]
         pred_scores = pred_scores.permute(0, 2, 1).contiguous()
         pred_distri = pred_distri.permute(0, 2, 1).contiguous()
 
         dtype = pred_scores.dtype
         batch_size = pred_scores.shape[0]
+
+
         imgsz = torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype) * self.stride[0]  # image size (h,w)
+        # 生成每个特征图对应的锚点坐标和步长信息
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
+        # 将真实标签 targets 转换为与预测结果对齐的格式
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
+        # xywh --> xyxy
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
+        # 输出 gt_labels（类别标签）和 gt_bboxes（边界框坐标）
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
@@ -232,6 +245,7 @@ class v8DetectionLoss:
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
+        # 为每个锚点分配正样本
         _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             pred_scores.detach().sigmoid(),

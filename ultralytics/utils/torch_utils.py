@@ -309,6 +309,7 @@ def model_info(model, cfg, detailed=False, verbose=True, imgsz=640):
     if cfg is not None:
         b_n_p = get_backbone_num_params(model, cfg["backbone"])
     n_g = get_num_gradients(model)  # number of gradients
+    y = list(model.modules())
     n_l = len(list(model.modules()))  # number of layers
     if detailed:
         LOGGER.info(f"{'layer':>5}{'name':>40}{'gradient':>10}{'parameters':>12}{'shape':>20}{'mu':>10}{'sigma':>10}")

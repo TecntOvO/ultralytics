@@ -795,6 +795,9 @@ class Model(nn.Module):
         args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
         if args.get("resume"):
             args["resume"] = self.ckpt_path
+        if args["save_score"]:
+            LOGGER.warning("save_score is forbidden when training,setting 'save_score=False'")
+            args["save_score"] = False
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming

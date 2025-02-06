@@ -68,19 +68,6 @@ class PreNorm(nn.Module):
         else:
             return self.fn(self.norm(x), **kwargs)
 
-class PreGroupNorm(nn.Module):
-    def __init__(self, dim, group, fn = None):
-        super().__init__()
-        self.norm = nn.GroupNorm(group, dim)
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        if self.fn is None:
-            return self.norm(x)
-        else:
-            return self.fn(self.norm(x), **kwargs)
-
-
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
@@ -98,12 +85,7 @@ class FeedForward(nn.Module):
                 )
         self.net = nn.Sequential(
             conv_1x1(dim, hidden_dim,True,True, dropout),
-            # nn.Linear(dim, hidden_dim),
-            # nn.SiLU(),
-            # nn.Dropout(dropout),
-            # nn.Linear(hidden_dim, dim),
-            conv_1x1(hidden_dim, dim,True,False, dropout),
-            # nn.Dropout(dropout)
+            conv_1x1(hidden_dim, dim,True,False, dropout)
         )
 
     def forward(self, x):
@@ -138,75 +120,6 @@ class Attention_M(nn.Module):
         return self.to_out(out)
 
 
-class LinearSelfAttention(nn.Module):
-    """
-    线性可分离自注意力方法, 具体原理参照论文 `https://arxiv.org/abs/2206.02680`
-    Args:
-        embed_dim (int): :math:`[B, d, P, N]` 中的维度 :math:`d`，就是输入的特征维度
-        attn_drop (float): 可分离自注意力中dropout的概率. 默认值: 0.0
-        proj_drop (float):
-        bias (bool): 线性映射中是否使用偏置. 默认值: True
-    Shape:
-        - Input: :math:`(N, C, P, N)` where :math:`N` is the batch size, :math:`C` is the input channels,
-        :math:`P` is the number of pixels in the patch, and :math:`N` is the number of patches
-        - Output: same as the input
-    """
-    def __init__(
-        self,
-        embed_dim: int,
-        patch_size: int,
-        attn_drop: float = 0.0,
-        proj_drop: float = 0.0,
-        bias: bool = True,
-    ) -> None:
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.ikv_proj = nn.Conv2d(
-            in_channels=embed_dim,
-            out_channels=1 + (2 * embed_dim),
-            bias=bias,
-            kernel_size=1,
-        )
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.out_proj = nn.Conv2d(
-            in_channels=embed_dim,
-            out_channels=embed_dim,
-            bias=bias,
-            kernel_size=1,
-        )
-        self.out_drop = nn.Dropout(proj_drop)
-
-    def forward(self, x: torch.Tensor, kwargs) -> torch.Tensor:
-        self.img_h = kwargs["img_h"]
-        self.img_w = kwargs["img_w"]
-        # 线性映射
-        # [B, d, P, N] --> [B, 1 + 2d, P, N]
-        ikv = self.ikv_proj(x)
-
-        # 分离出inp,key和value
-        # inp --> [B, 1, P, N]
-        # value, key --> [B, d, P, N]
-        inp, key, value = torch.split(
-            ikv, split_size_or_sections=[1, self.embed_dim, self.embed_dim], dim=1
-        )
-
-        # 上下文分数 --> [B, 1, P, N]
-        context_scores = F.softmax(inp, dim=-1)
-        context_scores = self.attn_drop(context_scores)
-
-        # 计算上下文向量
-        # [B, d, P, N] x [B, 1, P, N] -> [B, d, P, N] --> [B, d, P, 1]
-        context_vector = (key * context_scores).sum(dim=-1, keepdim=True)
-
-        # combine context vector with values
-        # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
-        out = F.relu(value) * context_vector.expand_as(value)
-        out = self.out_proj(out)
-        out = self.out_drop(out)
-        return out, context_scores
-
-
-
 class Transformer(nn.Module):
     def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
         super().__init__()
@@ -222,39 +135,6 @@ class Transformer(nn.Module):
             x = attn(x) + x
             x = ff(x) + x
         return x
-
-
-class LinearTransformer(nn.Module):
-    def __init__(
-            self,
-            embed_dim: int,
-            hid_dim: int,
-            depth: int,
-            patch_size: int,
-            proj_drop: float = 0.0,
-            attn_drop: float = 0.0,
-            ff_dropout: float = 0.0
-    ) -> None:
-        super().__init__()
-        self.layers = nn.ModuleList([])
-        self.norm = nn.GroupNorm(1, embed_dim)
-        for _ in range(depth):
-            self.layers.append(nn.ModuleList([
-                LinearSelfAttention(embed_dim, patch_size, attn_drop, proj_drop),
-                FeedForward(embed_dim, hid_dim, ff_dropout)
-            ]))
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        context_scores = []
-        for attn, ff in self.layers:
-            x = self.norm(x)
-            x_, score = attn(x)
-            context_scores.append(score)
-            x = x_ + x
-            x = self.norm(x)
-            x = ff(x) + x
-        x = self.norm(x)
-        return x, context_scores
 
 
 class MV2Block(nn.Module):
@@ -296,7 +176,6 @@ class MV2Block(nn.Module):
             return x + self.conv(x)
         else:
             return self.conv(x)
-
 
 class MobileViTBlock(nn.Module):
     # CSDN 迪菲赫尔曼
@@ -362,9 +241,128 @@ class MobileViTBlock(nn.Module):
         return x
 
 
+class LinearSelfAttention(nn.Module):
+    """
+    线性可分离自注意力方法, 具体原理参照论文 `https://arxiv.org/abs/2206.02680`
+    Args:
+        embed_dim (int): :math:`[B, d, P, N]` 中的维度 :math:`d`，就是输入的特征维度
+        attn_drop (float): 可分离自注意力中dropout的概率. 默认值: 0.0
+        proj_drop (float):
+        bias (bool): 线性映射中是否使用偏置. 默认值: True
+    Shape:
+        - Input: :math:`(N, C, P, N)` where :math:`N` is the batch size, :math:`C` is the input channels,
+        :math:`P` is the number of pixels in the patch, and :math:`N` is the number of patches
+        - Output: same as the input
+    """
+
+    def __init__(
+            self,
+            embed_dim: int,
+            patch_size: int,
+            attn_drop: float = 0.0,
+            proj_drop: float = 0.0,
+            bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.ikv_proj = nn.Conv2d(
+            in_channels=embed_dim,
+            out_channels=1 + (2 * embed_dim),
+            bias=bias,
+            kernel_size=1,
+        )
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.out_proj = nn.Conv2d(
+            in_channels=embed_dim,
+            out_channels=embed_dim,
+            bias=bias,
+            kernel_size=1,
+        )
+        self.out_drop = nn.Dropout(proj_drop)
+        self.context_scores = None
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 线性映射
+        # [B, d, P, N] --> [B, 1 + 2d, P, N]
+        ikv = self.ikv_proj(x)
+
+        # 分离出inp,key和value
+        # inp --> [B, 1, P, N]
+        # value, key --> [B, d, P, N]
+        inp, key, value = torch.split(
+            ikv, split_size_or_sections=[1, self.embed_dim, self.embed_dim], dim=1
+        )
+
+        # 上下文分数 --> [B, 1, P, N]
+        context_scores = F.softmax(inp, dim=-1)
+        context_scores = self.attn_drop(context_scores)
+        self.context_scores = context_scores.detach().clone()
+
+        # 计算上下文向量
+        # [B, d, P, N] x [B, 1, P, N] -> [B, d, P, N] --> [B, d, P, 1]
+        context_vector = (key * context_scores).sum(dim=-1, keepdim=True)
+
+        # combine context vector with values
+        # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
+        out = F.relu(value) * context_vector.expand_as(value)
+        out = self.out_proj(out)
+        out = self.out_drop(out)
+        return out
+
+class PreGroupNorm(nn.Module):
+    def __init__(self, dim, group, fn = None):
+        super().__init__()
+        self.norm = nn.GroupNorm(group, dim)
+        self.fn = fn
+
+    def forward(self, x, **kwargs):
+        if self.fn is None:
+            return self.norm(x)
+        else:
+            return self.fn(self.norm(x), **kwargs)
+
+class LinearTransformer(nn.Module):
+    def __init__(
+            self,
+            embed_dim: int,
+            hid_dim: int,
+            depth: int,
+            patch_size: int,
+            proj_drop: float = 0.0,
+            attn_drop: float = 0.0,
+            ff_dropout: float = 0.0,
+            layer_dropout: float = 0.3
+    ) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([])
+        self.norm = nn.GroupNorm(1, embed_dim)
+        self.layer_dropout = layer_dropout
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                nn.GroupNorm(1, embed_dim),
+                LinearSelfAttention(embed_dim, patch_size, attn_drop, proj_drop),
+                nn.GroupNorm(1, embed_dim),
+                FeedForward(embed_dim, hid_dim, ff_dropout)
+            ]))
+        self.context_scores = []
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        self.context_scores.clear()
+        for preattn_norm, attn, preff_norm, ff in self.layers:
+            if self.training and torch.rand(1).item() < self.layer_dropout:
+                pass
+            else:
+                x_ = preattn_norm(x)
+                x = attn(x_) + x
+                self.context_scores.append(attn.context_scores)
+                x_ = preff_norm(x)
+                x = ff(x_) + x
+        x = self.norm(x)
+        return x
+
+
 class MobileViTBlockv2(nn.Module):
     '''
-
     Args:
         embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
         depth: 可分离自注意力头的堆叠个数
@@ -374,7 +372,7 @@ class MobileViTBlockv2(nn.Module):
         kernel_size: 局部表征模块卷积核大小
         dropout: LinearTransformer中FeedForward的dropout概率
     '''
-    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0.):
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
@@ -388,61 +386,67 @@ class MobileViTBlockv2(nn.Module):
             nn.Conv2d(embed_dim, channel, 1, 1, 0, bias=False),
             nn.BatchNorm2d(channel)
         )
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
 
-        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout)
-        self.norm = nn.BatchNorm2d(1)
 
-    def forward(self, x, score_output=False):
+    def forward(self, x):
         # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
         x = self.conv_3x3_in(x)
         x = self.conv_1x1_in(x)
+
         # Unfold
         # [B, C, H, W] --> [B, d, P, N]
-        # _, _, h, w = x.shape
-        # x = rearrange(x, 'b d (h ph) (w pw) -> b (ph pw) (h w) d', ph=self.ph, pw=self.pw)
-        batch_size, in_channels, img_h, img_w = x.shape
-        if score_output:
-            assert batch_size == 1
+        self.batch_size, in_channels, self.img_h, self.img_w = x.shape
         patches = F.unfold(
             x,
             kernel_size=(self.ph, self.pw),
             stride=(self.ph, self.pw)
         )
         patches = patches.reshape(
-            batch_size, in_channels, self.ph * self.pw, -1
+            self.batch_size, in_channels, self.ph * self.pw, -1
         )
+
         # learn global representations on all patches
-        patches, context_scores = self.transformer(patches)
+        patches = self.transformer(patches)
 
         # Fold
         # [B, d, P, N] --> [B, C, H, W]
-        # x = rearrange(x, 'b d (ph pw) (h w) -> b d (h ph) (w pw)', h=h // self.ph, w=w // self.pw, ph=self.ph,
-        #               pw=self.pw)
         batch_size, in_dim, patch_size, n_patches = patches.shape
         patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
         x = F.fold(
             patches,
-            output_size=(img_h, img_w),
+            output_size=(self.img_h, self.img_w),
             kernel_size=(self.ph, self.pw),
             stride=(self.ph, self.pw)
         )
-        x = self.conv_1x1_out(x)
 
-        if score_output:
-            context_scores = torch.cat(context_scores, dim=0)
-            batch_size, in_dim, patch_size, n_patches = context_scores.shape
-            patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
-            y = F.fold(
-                patches,
-                output_size=(img_h, img_w),
-                kernel_size=(self.ph, self.pw),
-                stride=(self.ph, self.pw)
-            )
-            y = self.norm(y)
-            y = torch.split(y, dim=0)
-            return x, y
-        else:
-            return x
+        x = self.conv_1x1_out(x)
+        return x
+
+    def get_score(self):
+        assert self.batch_size == 1
+
+        context_scores = torch.cat(self.transformer.context_scores, dim=0)
+        # [d, 1, P, N]
+        batch_size, in_dim, patch_size, n_patches = context_scores.shape
+        assert in_dim == 1
+        # [d, 1, P, N] --> [d, P, N]
+        patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
+        # [d, P, N] --> [d, 1, H, W]
+        y = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        epsilon = 1e-5
+        y_min = y.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        y_max = y.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+
+        # 计算归一化，避免除零错误
+        y = (y - y_min) / (y_max - y_min + epsilon)
+        y = torch.split(y.squeeze(),1, dim=0)
+        return y
 
 class TridentBlock(nn.Module):
     def __init__(self, c1, c2, stride=1, c=False, e=0.5, padding=[1, 2, 3], dilate=[1, 2, 3], bias=False):
@@ -533,7 +537,6 @@ class TridentBlock(nn.Module):
         base_feat.append(x3)
         return base_feat
 
-
 class RFEM(nn.Module):
     def __init__(self, c1, c2, n=1, e=0.5, stride=1):
         super(RFEM, self).__init__()
@@ -553,15 +556,6 @@ class RFEM(nn.Module):
         out = out[0] + out[1] + out[2] + x
         out = self.act(self.bn(out))
         return out
-
-
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super(Residual, self).__init__()
-        self.fn = fn
-
-    def forward(self, x):
-        return self.fn(x) + x
 
 
 class ConvMixer(nn.Module):
@@ -599,6 +593,14 @@ class ConvMixer(nn.Module):
         y = self.fc(y).view(b, c, 1, 1)
         y = torch.exp(y)
         return x * y.expand_as(x)
+
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super(Residual, self).__init__()
+        self.fn = fn
+
+    def forward(self, x):
+        return self.fn(x) + x
 
 class SEAM(nn.Module):
     def __init__(self, c1, c2, n, reduction=16):

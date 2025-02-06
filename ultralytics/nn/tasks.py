@@ -9,6 +9,7 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+from ultralytics.utils import ops
 
 from ultralytics.nn.modules import (
     AIFI,
@@ -149,16 +150,22 @@ class BaseModel(nn.Module):
         """
         y, dt, embeddings = [], [], []  # outputs
         scores = []
+        profilers = (
+            ops.Profile(device=x.device),
+            ops.Profile(device=x.device)
+        )
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-
             if (m.type == 'ultralytics.nn.modules.block.MobileViTBlockv2' and
                     score_visualize and x.shape[0] == 1):
-                x, score = m(x, True)
-                scores.append([score])
+                with profilers[0]:
+                    x = m(x)
+                with profilers[1]:
+                    scores.append(m.get_score())
+                LOGGER.info(f"--Inference: {profilers[0].dt * 1e3}ms, Get_Score: {profilers[1].dt * 1e3}ms--")
             else:
                 x = m(x)
             y.append(x if m.i in self.save else None)  # save output

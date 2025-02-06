@@ -1,0 +1,48 @@
+#yolov11-MobileViT-xxs.yaml
+
+# Parameters
+nc: 80  # number of classes
+scales: # model compound scaling constants, i.e. 'model=yolov8n.yaml' will call yolov8.yaml with scale 'n'
+depth_multiple: 0.5  # model depth multiple
+width_multiple: 0.5  # layer channel multiple 0.25
+# depth_multiple  width_multiple  Summary
+#      0.50             0.25
+#      0.50             0.50      422 layers, 4,173,909 parameters(2,177,465 parameters in backbone), 4,173,893 gradients, 16.1 GFLOPs
+
+backbone:
+  # [from, repeats, module, args]
+  # [from, repeats, Conv, [c2, kernel_size, stride]]
+  # [from, repeats, MV2Block, [c2, stride, expandsion]]
+  # [from, repeats, MobileViTBlockv2, [embed_dim, depth, hid_dim, patch_size, kernel_size, dropout, layer_dropout]]
+  - [-1, 1, Conv, [32, 3, 2]]  # 0-P1/2
+  - [-1, 1, MV2Block, [64, 1, 2]]  # 1
+  - [-1, 1, MV2Block, [128, 2, 2]]  # 2-P2/4
+  - [-1, 1, MV2Block, [128, 1, 2]]  # 3
+  - [-1, 1, MV2Block, [256, 2, 2]]  # 4-P3/8
+  - [-1, 1, MobileViTBlockv2, [128, 2, 256, 2, 3, 0, 0.2]]
+  - [-1, 1, MV2Block, [384, 2, 2]]  # 6-P4/16
+  - [-1, 1, MobileViTBlockv2, [192, 4, 384, 2 ,3, 0, 0.4]]
+  - [-1, 1, MV2Block, [512, 2, 2]]  # 8-P5/16
+  - [-1, 1, MobileViTBlockv2, [256, 3, 512, 2 ,3, 0, 0.5]]
+
+head:
+  # [from, repeats, module, args]
+  # [from, repeats, MultiSEAM, [c2, depth, kernel_size, patch_size, reduction]]
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 7], 1, Concat, [1]]  # cat backbone P4
+  - [-1, 2, C3k2, [384, False]]  # 12
+
+  - [-1, 1, nn.Upsample, [None, 2, 'nearest']]
+  - [[-1, 5], 1, Concat, [1]]  # cat backbone P3
+  - [-1, 2, C3k2, [256, False]]  # 15 (P3/8-small)
+
+  - [-1, 1, Conv, [256, 3, 2]]
+  - [[-1, 12], 1, Concat, [1]]
+  - [-1, 2, C3k2, [384, False]] # 18 (P4/16-medium)
+
+  - [-1, 1, Conv, [384, 3, 2]]
+  - [[-1, 9], 1, Concat, [1]]  # cat head P4
+  - [-1, 2, C3k2, [512, True]]  # 21 (P5/32-large)
+
+  - [[15, 18, 21], 1, Detect, [nc]]  # Detect(P3, P4, P5)

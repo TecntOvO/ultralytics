@@ -279,7 +279,10 @@ class BasePredictor:
                         "postprocess": profilers[2].dt * 1e3 / n,
                     }
                     if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                        s[i] += self.write_results(i, Path(paths[i]), im, s)
+                        if self.args.save_score:
+                            s[i] += self.write_results(i, Path(paths[i]), im, s, score)
+                        else:
+                            s[i] += self.write_results(i, Path(paths[i]), im, s)
 
                 # Print batch results
                 if self.args.verbose:
@@ -323,8 +326,13 @@ class BasePredictor:
         self.args.half = self.model.fp16  # update half
         self.model.eval()
 
-    def write_results(self, i, p, im, s):
+    def write_results(self, i, p, im, s, score = None):
         """Write inference results to a file or directory."""
+        import seaborn
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')
+
         string = ""  # print string
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
@@ -336,6 +344,9 @@ class BasePredictor:
             frame = int(match[1]) if match else None  # 0 if frame undetermined
 
         self.txt_path = self.save_dir / "labels" / (p.stem + ("" if self.dataset.mode == "image" else f"_{frame}"))
+        score_folder = self.save_dir / p.name
+        if self.args.save_score:
+            (self.save_dir / p.name[:-4]).mkdir(parents=True, exist_ok=True)
         string += "{:g}x{:g} ".format(*im.shape[2:])
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
@@ -350,6 +361,15 @@ class BasePredictor:
                 labels=self.args.show_labels,
                 im_gpu=None if self.args.retina_masks else im[i],
             )
+        if self.args.save_score and score:
+            for block_idx, score_tuple in enumerate(score):
+                for score_idx, score_tensor in enumerate(score_tuple):
+                    score_feature = score_tensor.cpu().numpy().squeeze()
+                    seaborn.heatmap(score_feature, xticklabels=False, yticklabels=False, cbar=False, cmap='seismic')
+                    # plt.imshow(score_feature, cmap='hot', interpolation='nearest')
+                    plt.tight_layout(pad=0.0)
+                    plt.savefig(self.save_dir / p.name[:-4]/ f'MVIT_Block{block_idx}_Score{score_idx}.png')
+                    plt.close()
 
         # Save results
         if self.args.save_txt:
@@ -359,7 +379,10 @@ class BasePredictor:
         if self.args.show:
             self.show(str(p))
         if self.args.save:
-            self.save_predicted_images(str(self.save_dir / p.name), frame)
+            if self.args.save_score:
+                self.save_predicted_images(str(self.save_dir / p.name[:-4] / p.name), frame)
+            else:
+                self.save_predicted_images(str(self.save_dir / p.name), frame)
 
         return string
 

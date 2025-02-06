@@ -231,6 +231,79 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
 
+def RepGT_iog(box1, box2, x1y1x2y2=True):
+    box2 = box2.t()
+    if x1y1x2y2:
+        # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+    else:
+        # x, y, w, h = box1
+        b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+        b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+        b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+        b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+    inter_area = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+        (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+    g_area = torch.abs(b2_x2-b2_x1) * torch.abs(b2_y2-b2_y1)
+    iog = inter_area/g_area
+    return iog
+
+def RepGT_loss(box1, box2, x1y1x2y2=False):
+    #box2 = box2.t()
+    iog_loss = 0
+    #print(box1.shape, box2.shape)
+    proposal = bbox_iou(box1, box2, x1y1x2y2)>0.5
+    #print('RepGT bbox:', box1)
+    #print('RepGT gt:', box2.t())
+    for m in range(box1.size(1)):
+        if proposal[m]:
+            iou=bbox_iou(box1[:, m], box2, x1y1x2y2)
+            iou[m] = 0
+        #print(iou.shape)
+        #print(iou)
+            max = torch.argmax(iou)
+        #print('max=', max)
+            IOG = RepGT_iog(box1[:, m], box2[max.item(),:], x1y1x2y2)
+            if IOG >0.5:
+                iog_loss += 2*IOG-0.3  #alfa=0.5
+                #print('iog_loss1=', iog_loss)
+            else:
+                IOG = 1-IOG
+                iog_loss += -IOG.log()
+                #print('iog_loss2=', iog_loss)
+
+    if proposal.sum():
+        return iog_loss / proposal.sum()
+    else:
+        return 0
+
+def RepBox_loss(box, x1y1x2y2=False):
+    total = 0
+    bbox_sum = 0
+    for m in range(box.size(1)):
+        iou_list = bbox_iou(box[:, m], box[:, m:].t(), x1y1x2y2)
+        print('iou_list=', m, iou_list)
+        counter = iou_list > 0
+        #print('iou_list=', iou_list.sum())
+        counter = counter.sum() - 1
+        #print('counter=', m, counter)
+        if counter > 0:
+            for iou_unit in range(len(iou_list)):
+                if iou_list[iou_unit] > 0.5:
+                    iou_list[iou_unit] = 2 * iou_list[iou_unit] - 0.3
+                else:
+                    iou_list[iou_unit] = 1 - iou_list[iou_unit]
+                    #iou_list[iou_unit] = -torch.log(iou_list[iou_unit])
+            print('iou_loss1=', iou_list)
+            bbox_sum += (iou_list.sum()-1.7)
+            print(bbox_sum)
+            total += counter
+    #print('bbox_sum','total', bbox_sum, total)
+    if total:
+        return bbox_sum / total
+    else:
+        return 0
 
 def mask_iou(mask1, mask2, eps=1e-7):
     """
