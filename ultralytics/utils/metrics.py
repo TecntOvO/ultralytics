@@ -31,7 +31,7 @@ def get_inner_iou(box1, box2, xywh=True, eps=1e-7, ratio=0.7):
             (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
 
     # Union Area
-    union = w1 * h1 * ratio * ratio + w2 * h2 * ratio * ratio - inter + eps
+    union = w1 * h1 * (ratio ** 2) + w2 * h2 * (ratio ** 2) - inter + eps
     return inter / union
 
 
@@ -66,7 +66,7 @@ def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EI
         w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
         w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
 
-    innner_iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+    inner_iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
 
     # Intersection area
     inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
@@ -81,21 +81,24 @@ def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EI
         cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
         ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
         if CIoU or DIoU or EIoU or SIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
-            c2 = cw ** 2 + ch ** 2 + eps  # convex diagonal squared
-            rho2 = ((b2_x1 + b2_x2 - b1_x1 - b1_x2) ** 2 + (b2_y1 + b2_y2 - b1_y1 - b1_y2) ** 2) / 4  # center dist ** 2
+            c2 = cw.pow(2) + ch.pow(2) + eps  # convex diagonal squared
+            rho2 = (
+                (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
+            ) / 4  # center dist**2
             if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
-                v = (4 / math.pi ** 2) * (torch.atan(w2 / h2) - torch.atan(w1 / h1)).pow(2)
+                v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
-                return innner_iou - (rho2 / c2 + v * alpha)  # CIoU
+                return inner_iou - (rho2 / c2 + v * alpha)  # inner-CIoU
             elif EIoU:
                 rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
                 rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
                 cw2 = cw ** 2 + eps
                 ch2 = ch ** 2 + eps
-                return innner_iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)  # EIoU
+                return inner_iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)     # inner-EIoU
             elif SIoU:
                 # SIoU Loss https://arxiv.org/pdf/2205.12740.pdf
+                # angle loss
                 s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
                 s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
                 sigma = torch.pow(s_cw ** 2 + s_ch ** 2, 0.5)
@@ -104,18 +107,22 @@ def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EI
                 threshold = pow(2, 0.5) / 2
                 sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
                 angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+
+                # distance loss
                 rho_x = (s_cw / cw) ** 2
                 rho_y = (s_ch / ch) ** 2
                 gamma = angle_cost - 2
                 distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+
+                #shape loss
                 omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
                 omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
                 shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
-                return innner_iou - 0.5 * (distance_cost + shape_cost) + eps  # SIoU
-            return innner_iou - rho2 / c2  # DIoU
+                return inner_iou - 0.5 * (distance_cost + shape_cost) + eps  # inner-SIoU
+            return inner_iou - rho2 / c2  # inner-DIoU
         c_area = cw * ch + eps  # convex area
-        return innner_iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
-    return innner_iou  # IoU
+        return inner_iou - (c_area - union) / c_area  # inner-GIoU https://arxiv.org/pdf/1902.09630.pdf
+    return inner_iou  # inner-IoU
 
 #################################################################################################################
 
@@ -250,28 +257,21 @@ def RepGT_iog(box1, box2, x1y1x2y2=True):
     return iog
 
 def RepGT_loss(box1, box2, x1y1x2y2=False):
-    #box2 = box2.t()
     iog_loss = 0
-    #print(box1.shape, box2.shape)
-    proposal = bbox_iou(box1, box2, x1y1x2y2)>0.5
-    #print('RepGT bbox:', box1)
-    #print('RepGT gt:', box2.t())
+    # P+ 正候选框
+    proposal = bbox_iou(box1, box2, x1y1x2y2) > 0.5
     for m in range(box1.size(1)):
         if proposal[m]:
+            # 在除去预测框本身要回归的所有真实框中，找到和预测框iou最大的真实框
             iou=bbox_iou(box1[:, m], box2, x1y1x2y2)
             iou[m] = 0
-        #print(iou.shape)
-        #print(iou)
-            max = torch.argmax(iou)
-        #print('max=', max)
-            IOG = RepGT_iog(box1[:, m], box2[max.item(),:], x1y1x2y2)
+            max_LOG = torch.argmax(iou)
+            IOG = RepGT_iog(box1[:, m], box2[max_LOG.item(),:], x1y1x2y2)
             if IOG >0.5:
                 iog_loss += 2*IOG-0.3  #alfa=0.5
-                #print('iog_loss1=', iog_loss)
             else:
                 IOG = 1-IOG
                 iog_loss += -IOG.log()
-                #print('iog_loss2=', iog_loss)
 
     if proposal.sum():
         return iog_loss / proposal.sum()
@@ -283,11 +283,8 @@ def RepBox_loss(box, x1y1x2y2=False):
     bbox_sum = 0
     for m in range(box.size(1)):
         iou_list = bbox_iou(box[:, m], box[:, m:].t(), x1y1x2y2)
-        print('iou_list=', m, iou_list)
         counter = iou_list > 0
-        #print('iou_list=', iou_list.sum())
         counter = counter.sum() - 1
-        #print('counter=', m, counter)
         if counter > 0:
             for iou_unit in range(len(iou_list)):
                 if iou_list[iou_unit] > 0.5:
@@ -295,9 +292,7 @@ def RepBox_loss(box, x1y1x2y2=False):
                 else:
                     iou_list[iou_unit] = 1 - iou_list[iou_unit]
                     #iou_list[iou_unit] = -torch.log(iou_list[iou_unit])
-            print('iou_loss1=', iou_list)
             bbox_sum += (iou_list.sum()-1.7)
-            print(bbox_sum)
             total += counter
     #print('bbox_sum','total', bbox_sum, total)
     if total:

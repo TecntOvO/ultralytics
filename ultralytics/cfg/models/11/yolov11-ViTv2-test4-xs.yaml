@@ -17,11 +17,11 @@ backbone:
   - [-1, 1, MV2Block, [48, 2, 2]]  # 2-P2/4
   - [-1, 1, MV2Block, [48, 1, 2]]  # 3
   - [-1, 1, MV2Block, [96, 2, 2]]  # 4-P3/8
-  - [-1, 1, MobileViTBlockv2, [48, 2, 96, 2, 3, 0, 0.15]]
+  - [-1, 1, MobileViTBlockv2, [48, 2, 96, 2, 3, 0, 0.0]]
   - [-1, 1, MV2Block, [160, 2, 2]]  # 6-P4/16
-  - [-1, 1, MobileViTBlockv2, [80, 4, 160, 2 ,3, 0, 0.2]]
+  - [-1, 1, MobileViTBlockv2, [80, 4, 160, 2 ,3, 0, 0.0]]
   - [-1, 1, MV2Block, [160, 2, 2]]  # 8-P5/16
-  - [-1, 1, MobileViTBlockv2, [80, 3, 160, 2 ,3, 0, 0.3]]
+  - [-1, 1, MobileViTBlockv2, [80, 3, 160, 1 ,3, 0, 0.0]]
 
 head:
   # [from, repeats, module, args]

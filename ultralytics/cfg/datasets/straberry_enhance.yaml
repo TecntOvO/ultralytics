@@ -1,7 +1,6 @@
-path: D:/Yolov11/datasets/split_whole_7-3 # dataset root dir
+path: D:/Yolov11/datasets/split_whole_enhance_7-3 # dataset root dir
 train: images/train
 val: images/val
-test: images/test
 
 # Classes
 names:

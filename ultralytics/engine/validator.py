@@ -92,6 +92,8 @@ class BaseValidator:
         self.nc = None
         self.iouv = None
         self.jdict = None
+        self.mIoU = 0.0
+        self.boxes_num = 0
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
 
         self.save_dir = save_dir or get_save_dir(self.args)
@@ -108,6 +110,8 @@ class BaseValidator:
         """Executes validation process, running inference on dataloader and computing performance metrics."""
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
+        self.mIoU = 0.0
+        self.boxes_num = 0
         if self.training:
             self.device = trainer.device
             self.data = trainer.data
@@ -194,6 +198,7 @@ class BaseValidator:
                 self.plot_predictions(batch, preds, batch_i)
 
             self.run_callbacks("on_val_batch_end")
+        self.mIoU /= self.boxes_num + 1e-7
         stats = self.get_stats()
         self.check_stats(stats)
         self.speed = dict(zip(self.speed.keys(), (x.t / len(self.dataloader.dataset) * 1e3 for x in dt)))
@@ -203,7 +208,7 @@ class BaseValidator:
         if self.training:
             model.float()
             results = {**stats, **trainer.label_loss_items(self.loss.cpu() / len(self.dataloader), prefix="val")}
-            return {k: round(float(v), 5) for k, v in results.items()}  # return results as 5 decimal place floats
+            return {k: round(float(v), 5) for k, v in results.items()}, self.mIoU  # return results as 5 decimal place floats
         else:
             LOGGER.info(
                 "Speed: {:.1f}ms preprocess, {:.1f}ms inference, {:.1f}ms loss, {:.1f}ms postprocess per image".format(
@@ -238,6 +243,8 @@ class BaseValidator:
         correct_class = true_classes[:, None] == pred_classes
         iou = iou * correct_class  # zero out the wrong classes
         iou = iou.cpu().numpy()
+        IoU_for_mean = 0
+        match_count = 0
         for i, threshold in enumerate(self.iouv.cpu().tolist()):
             if use_scipy:
                 # WARNING: known issue that reduces mAP in https://github.com/ultralytics/ultralytics/pull/4708
@@ -258,8 +265,11 @@ class BaseValidator:
                         matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
                         # matches = matches[matches[:, 2].argsort()[::-1]]
                         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+                    if threshold == 0.5:
+                        IoU_for_mean = iou[matches[:, 0], matches[:, 1]].sum()
+                        match_count = matches.shape[0]
                     correct[matches[:, 1].astype(int), i] = True
-        return torch.tensor(correct, dtype=torch.bool, device=pred_classes.device)
+        return torch.tensor(correct, dtype=torch.bool, device=pred_classes.device), IoU_for_mean, match_count
 
     def add_callback(self, event: str, callback):
         """Appends the given callback."""

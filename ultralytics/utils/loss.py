@@ -9,7 +9,7 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou, bbox_inner_iou
+from .metrics import bbox_iou, probiou, bbox_inner_iou, RepGT_loss, RepBox_loss
 from .tal import bbox2dist
 
 
@@ -88,32 +88,71 @@ class DFLoss(nn.Module):
             + F.cross_entropy(pred_dist, tr.view(-1), reduction="none").view(tl.shape) * wr
         ).mean(-1, keepdim=True)
 
+class AdaptiveThresholdFocalLoss(nn.Module):
+    # Wraps focal loss around existing loss_fcn(), i.e. criteria = FocalLoss(nn.BCEWithLogitsLoss(), gamma=1.5)
+    def __init__(self, device, reduction="none"):
+        super(AdaptiveThresholdFocalLoss, self).__init__()
+        self.loss_fcn = nn.BCEWithLogitsLoss(reduction=reduction)
+        self.p_t_old_mean = torch.zeros(1, device=device)
+        self.count = torch.zeros(1, device=device)
 
+    def forward(self, pred, true):
+        loss = self.loss_fcn(pred, true)
+        pred_prob = torch.sigmoid(pred)
+        p_t = true * pred_prob + (1 - true) * (1 - pred_prob)  # 得出预测概率
+        p_t = torch.Tensor(p_t)  # 将张量转化为pytorch张量，使其在pytorch中可以进行张量运算
+        mean_pt = p_t.mean()
+        p_t_new = 0.05 * self.p_t_old_mean[0] + 0.95 * mean_pt
+        self.p_t_old_mean[0] = (self.p_t_old_mean[0] * self.count[0] + mean_pt.detach().clone()) / (self.count[0] + 1)
+        self.count[0] += 1
+
+        gamma_ = -torch.log(p_t_new)
+        lambda_ = -torch.log(mean_pt)
+
+        # 处理大于0.5的元素,easy样本
+        p_t_high = torch.where(p_t > 0.5, (1.000001 - p_t) ** gamma_, torch.zeros_like(p_t))
+        # 处理小于0.5的元素，hard样本
+        p_t_low = torch.where(p_t <= 0.5, (1.5 - p_t) ** lambda_, torch.zeros_like(p_t))  # # 将两部分结果相加
+
+        modulating_factor = p_t_high + p_t_low
+        loss *= modulating_factor
+
+        return loss
 
 class BboxLoss(nn.Module):
     """Criterion class for computing training losses during training."""
 
-    def                                                                                                       __init__(self, reg_max=16):
+    def __init__(self, reg_max=16):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, small_target_scores, target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask):
         """IoU loss."""
-        weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        weight_iou = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
+        weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
+
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True, ratio=0.7)
-        loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        small_iou = bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True)
+
+        # small_iou = bbox_inner_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True, ratio=0.70)
+        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True, ratio=1.10)
+
+        loss_iou = ((1.0 - iou) * weight_iou).sum() / target_scores_sum
+        loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
+
+        # loss_rep_gt = RepGT_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], x1y1x2y2=True)
+        # loss_rep_box = RepBox_loss(pred_bboxes[fg_mask], x1y1x2y2=True)
 
         # DFL loss
         if self.dfl_loss:
             target_ltrb = bbox2dist(anchor_points, target_bboxes, self.dfl_loss.reg_max - 1)
-            loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight
+            loss_dfl = self.dfl_loss(pred_dist[fg_mask].view(-1, self.dfl_loss.reg_max), target_ltrb[fg_mask]) * weight_iou
             loss_dfl = loss_dfl.sum() / target_scores_sum
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
-        return loss_iou, loss_dfl
+        return loss_iou, loss_dfl, loss_small_iou
 
 
 class RotatedBboxLoss(BboxLoss):
@@ -167,6 +206,8 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.fcl = FocalLoss()
+        self.atfl = AdaptiveThresholdFocalLoss(device)
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -186,15 +227,20 @@ class v8DetectionLoss:
         if nl == 0:
             out = torch.zeros(batch_size, 0, ne - 1, device=self.device)
         else:
+            # batch_idx
             i = targets[:, 0]  # image index
+            # counts每一项为每个图片的标签数
             _, counts = i.unique(return_counts=True)
             counts = counts.to(dtype=torch.int32)
             out = torch.zeros(batch_size, counts.max(), ne - 1, device=self.device)
             for j in range(batch_size):
+                # matches中True即为该图片对应的标签
                 matches = i == j
                 n = matches.sum()
                 if n:
+                    # 将属于该图片的标签写入out中对应的batch中
                     out[j, :n] = targets[matches, 1:]
+            # 将后面对应boxes的中心点的坐标以及长宽转换为xyxy的格式，并转换成原图上的坐标
             out[..., 1:5] = xywh2xyxy(out[..., 1:5].mul_(scale_tensor))
         return out
 
@@ -202,6 +248,15 @@ class v8DetectionLoss:
         """Decode predicted object bounding box coordinates from anchor points and distribution."""
         if self.use_dfl:
             b, a, c = pred_dist.shape  # batch, anchors, channels
+            # 最后一个通道按照c//4的个数进行分配，进行softmax后再与一个一维投影张量（长度为c//4)点积
+            # pred_dist.view(b, a, 4, c//4) 将原始预测张量重塑为 (b, a, 4, reg_max)。
+            # 这里 4 对应（dx_lt, dy_ly, dx_rb, dy_rb)），reg_max 是离散化的区间数
+            # softmax(3) 对最后一个维度（即 reg_max）进行概率归一化。这一步将模型输出的原始 logits 转换为概率分布，表示目标框坐标落在某个区间的概率
+            # .matmul(self.proj) 对概率分布进行加权求和，实现了一个离散分布到连续值积分的转换过程，其核心作用是通过概率分布加权求和的方式生成最终的回归预测值
+            # 可以理解为比如的的第一个x对应的softmax（reg_max）中的每一个值代表其取对应值（这个值即为self.proj中对应位置的值）的概率
+            # self.proj的数值代表对目标框位置（如中心坐标、宽高）的离散化建模，相当于将连续空间划分为多个区间（"bins"）
+            # reg_max 越大，离散化越精细，但计算量也会增加
+            # pred_dist --> [b, a, 4, c//4] -> [b, a, 4, softmax[c//4]] * [c//4] -> [b, a, 4]
             pred_dist = pred_dist.view(b, a, 4, c // 4).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = pred_dist.view(b, a, c // 4, 4).transpose(2,3).softmax(3).matmul(self.proj.type(pred_dist.dtype))
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
@@ -209,7 +264,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss = torch.zeros(3, device=self.device)  # box, cls, dfl
+        loss_total = torch.zeros(4, device=self.device)  # box, cls, dfl, smallbox
 
         # 将多尺度特征图 feats 的预测结果拆分为 pred_distri（边界框分布）和 pred_scores（类别分数）
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -232,24 +287,37 @@ class v8DetectionLoss:
         anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
 
         # Targets
-        # 将真实标签 targets 转换为与预测结果对齐的格式
+        # 将真实标签 targets 转换为与预测结果对齐的格式，每一个真实标签张量构成如下
+        # [batch_idx, cls, bboxes[0], bboxes[1], bboxes[2], bboxes[3]]
         targets = torch.cat((batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]), 1)
-        # xywh --> xyxy
+        # 将每一张图片的标签归类，并将boxes的表示从xywh转换为xyxy，同时对齐张量尺寸
+        # targets --> [batchsize, max_labels_num, [cls, x1, y1, x2, y2]], [cls, x1, y1, x2, y2]为每一个labels的
         targets = self.preprocess(targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]])
         # 输出 gt_labels（类别标签）和 gt_bboxes（边界框坐标）
+        # gt_labels --> [batchsize, max_label_num, [cls]]
+        # gt_bboxes --> [batchsize, max_label_num, [x1, y1, x2, y2]]
         gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        # 判断那些labels是有效的，因为max_label_num在很多图片上并没有那么多labels，所以如果全0那么代表是空的，无效的
         mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
 
         # Pboxes
+        # 解算出pred_distri中对每个anchor的距离信息，同anchor_points计算得到所有预测框
+        # pred_bboxes -> [batchsize, anchor_num, [x1,y1,x2,y2]]
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
         # dfl_conf = pred_distri.view(batch_size, -1, 4, self.reg_max).detach().softmax(-1)
         # dfl_conf = (dfl_conf.amax(-1).mean(-1) + dfl_conf.amax(-1).amin(-1)) / 2
 
-        # 为每个锚点分配正样本
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+        # 为每个锚点（anchor）分配最匹配的真实目标（ground-truth），通过联合优化分类分数和边界框 IoU（任务对齐），提升分类与定位的一致性。
+        # target_bboxes -> [bs, num_anchors, 4] 给每个锚点分配的正样本的真实框坐标
+        # target_scores -> [bs, num_anchors, num_classes] 分配的类别分数
+        # fg_mask -> [batchsize, num_total_anchors] 1表示有对应正样本的锚框
+        _, target_bboxes, target_scores, small_target_scores, fg_mask, small_fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
+            # 将预测类别分数转换为概率
             pred_scores.detach().sigmoid(),
+            # 预测框坐标放缩到原图上
             (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            # 锚框坐标放缩到原图上
             anchor_points * stride_tensor,
             gt_labels,
             gt_bboxes,
@@ -257,23 +325,28 @@ class v8DetectionLoss:
         )
 
         target_scores_sum = max(target_scores.sum(), 1)
+        small_target_scores_sum = max(small_target_scores.sum(), 1)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
-        loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        loss_total[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[1] = self.fcl(pred_scores, target_scores.to(dtype), 1.5, 0.75).sum() / target_scores_sum
+        # loss[1] = self.atfl(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+
 
         # Bbox loss
         if fg_mask.sum():
             target_bboxes /= stride_tensor
-            loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+            loss_total[0], loss_total[2], loss_total[3] = self.bbox_loss(
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, small_target_scores, target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask
             )
 
-        loss[0] *= self.hyp.box  # box gain
-        loss[1] *= self.hyp.cls  # cls gain
-        loss[2] *= self.hyp.dfl  # dfl gain
+        loss_total[0] *= self.hyp.box  # box gain
+        loss_total[1] *= self.hyp.cls  # cls gain
+        loss_total[2] *= self.hyp.dfl  # dfl gain
+        loss_total[3] *= self.hyp.box  # box gain
 
-        return loss.sum() * batch_size, loss.detach()  # loss(box, cls, dfl)
+        return loss_total[:3].sum() * batch_size, loss_total.detach()  # loss(box, cls, dfl, smallbox)
 
 
 class v8SegmentationLoss(v8DetectionLoss):

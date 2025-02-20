@@ -60,7 +60,9 @@ from .block import (
     MobileViTBlock,
     SEAM,
     MultiSEAM,
-    MobileViTBlockv2
+    MobileViTBlockv2,
+    MobileViTBlockv3,
+    ConvMixer
 )
 from .conv import (
     CBAM,
@@ -76,6 +78,7 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
+    WeightedConcat
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (
@@ -164,5 +167,6 @@ __all__ = (
     "MV2Block",
     "MobileViTBlock",
     "SEAM",
-    'MultiSEAM'
+    'MultiSEAM',
+    'ConvMixer'
 )

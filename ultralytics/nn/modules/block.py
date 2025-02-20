@@ -54,8 +54,10 @@ __all__ = (
     'MobileViTBlock',
     'SEAM',
     'MultiSEAM',
-    'MobileViTBlockv2'
+    'MobileViTBlockv2',
+    'MobileViTBlockv3',
 )
+#####################################################################
 class PreNorm(nn.Module):
     def __init__(self, dim, fn = None):
         super().__init__()
@@ -67,29 +69,6 @@ class PreNorm(nn.Module):
             return self.norm(x)
         else:
             return self.fn(self.norm(x), **kwargs)
-
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim, dropout=0.):
-        super().__init__()
-        def conv_1x1(inp, oup, use_bias = False, use_act = True, dropout = 0.):
-            if use_act:
-                return nn.Sequential(
-                    nn.Conv2d(inp, oup, 1, 1, 0, bias=use_bias),
-                    nn.SiLU(),
-                    nn.Dropout(dropout)
-                )
-            else:
-                return nn.Sequential(
-                    nn.Conv2d(inp, oup, 1, 1, 0, bias=use_bias),
-                    nn.Dropout(dropout)
-                )
-        self.net = nn.Sequential(
-            conv_1x1(dim, hidden_dim,True,True, dropout),
-            conv_1x1(hidden_dim, dim,True,False, dropout)
-        )
-
-    def forward(self, x):
-        return self.net(x)
 
 
 class Attention_M(nn.Module):
@@ -136,46 +115,6 @@ class Transformer(nn.Module):
             x = ff(x) + x
         return x
 
-
-class MV2Block(nn.Module):
-    # CSDN 迪菲赫尔曼
-    def __init__(self, inp, oup, stride=1, expansion=4):
-        super().__init__()
-        self.stride = stride
-        assert stride in [1, 2]
-
-        hidden_dim = int(inp * expansion)
-        self.use_res_connect = self.stride == 1 and inp == oup
-
-        if expansion == 1:
-            self.conv = nn.Sequential(
-                # dw
-                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
-                nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(),
-                # pw-linear
-                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(oup),
-            )
-        else:
-            self.conv = nn.Sequential(
-                nn.Conv2d(inp, hidden_dim, kernel_size=1, stride=1, bias=False),
-                nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(),
-                # dw
-                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
-                nn.BatchNorm2d(hidden_dim),
-                nn.SiLU(),
-                # pw-linear
-                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(oup),
-            )
-
-    def forward(self, x):
-        if self.use_res_connect:
-            return x + self.conv(x)
-        else:
-            return self.conv(x)
 
 class MobileViTBlock(nn.Module):
     # CSDN 迪菲赫尔曼
@@ -241,6 +180,61 @@ class MobileViTBlock(nn.Module):
         return x
 
 
+class MV2Block(nn.Module):
+    def __init__(self, inp, oup, stride=1, expansion=4):
+        super().__init__()
+        self.stride = stride
+        assert stride in [1, 2]
+
+        hidden_dim = int(inp * expansion)
+        self.use_res_connect = self.stride == 1 and inp == oup
+
+        if expansion == 1:
+            self.conv = nn.Sequential(
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.SiLU(),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
+        else:
+            self.conv = nn.Sequential(
+                nn.Conv2d(inp, hidden_dim, kernel_size=1, stride=1, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.SiLU(),
+                # dw
+                nn.Conv2d(hidden_dim, hidden_dim, 3, stride, 1, groups=hidden_dim, bias=False),
+                nn.BatchNorm2d(hidden_dim),
+                nn.SiLU(),
+                # pw-linear
+                nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
+                nn.BatchNorm2d(oup),
+            )
+
+    def forward(self, x):
+        if self.use_res_connect:
+            return x + self.conv(x)
+        else:
+            return self.conv(x)
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim, dropout=0.):
+        super().__init__()
+        self.conv_in = nn.Sequential(
+                    nn.Conv2d(dim, hidden_dim, 1, 1, 0, bias=True),
+                    nn.SiLU()
+        )
+        self.conv_out = nn.Conv2d(hidden_dim, dim, 1, 1, 0, bias=True)
+        self.dropout = nn.Dropout(p=dropout)
+
+    def forward(self, x):
+        x = self.conv_in(x)
+        x = self.dropout(x)
+        return self.conv_out(x)
+
+
 class LinearSelfAttention(nn.Module):
     """
     线性可分离自注意力方法, 具体原理参照论文 `https://arxiv.org/abs/2206.02680`
@@ -258,9 +252,7 @@ class LinearSelfAttention(nn.Module):
     def __init__(
             self,
             embed_dim: int,
-            patch_size: int,
             attn_drop: float = 0.0,
-            proj_drop: float = 0.0,
             bias: bool = True,
     ) -> None:
         super().__init__()
@@ -271,14 +263,13 @@ class LinearSelfAttention(nn.Module):
             bias=bias,
             kernel_size=1,
         )
-        self.attn_drop = nn.Dropout(attn_drop)
+        self.attn_drop = nn.Dropout(p=attn_drop)
         self.out_proj = nn.Conv2d(
             in_channels=embed_dim,
             out_channels=embed_dim,
             bias=bias,
             kernel_size=1,
         )
-        self.out_drop = nn.Dropout(proj_drop)
         self.context_scores = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -296,7 +287,8 @@ class LinearSelfAttention(nn.Module):
         # 上下文分数 --> [B, 1, P, N]
         context_scores = F.softmax(inp, dim=-1)
         context_scores = self.attn_drop(context_scores)
-        self.context_scores = context_scores.detach().clone()
+        if not self.training:
+            self.context_scores = context_scores.detach().clone()
 
         # 计算上下文向量
         # [B, d, P, N] x [B, 1, P, N] -> [B, d, P, N] --> [B, d, P, 1]
@@ -306,20 +298,8 @@ class LinearSelfAttention(nn.Module):
         # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
         out = F.relu(value) * context_vector.expand_as(value)
         out = self.out_proj(out)
-        out = self.out_drop(out)
         return out
 
-class PreGroupNorm(nn.Module):
-    def __init__(self, dim, group, fn = None):
-        super().__init__()
-        self.norm = nn.GroupNorm(group, dim)
-        self.fn = fn
-
-    def forward(self, x, **kwargs):
-        if self.fn is None:
-            return self.norm(x)
-        else:
-            return self.fn(self.norm(x), **kwargs)
 
 class LinearTransformer(nn.Module):
     def __init__(
@@ -327,38 +307,43 @@ class LinearTransformer(nn.Module):
             embed_dim: int,
             hid_dim: int,
             depth: int,
-            patch_size: int,
-            proj_drop: float = 0.0,
             attn_drop: float = 0.0,
             ff_dropout: float = 0.0,
+            dropout: float= 0.1,
             layer_dropout: float = 0.3
     ) -> None:
         super().__init__()
         self.layers = nn.ModuleList([])
         self.norm = nn.GroupNorm(1, embed_dim)
         self.layer_dropout = layer_dropout
+        self.dropout = nn.Dropout(p=dropout)
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
                 nn.GroupNorm(1, embed_dim),
-                LinearSelfAttention(embed_dim, patch_size, attn_drop, proj_drop),
+                LinearSelfAttention(embed_dim, attn_drop),
                 nn.GroupNorm(1, embed_dim),
                 FeedForward(embed_dim, hid_dim, ff_dropout)
             ]))
         self.context_scores = []
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        self.context_scores.clear()
+        if not self.training:
+            self.context_scores.clear()
+        skip_count = 0
         for preattn_norm, attn, preff_norm, ff in self.layers:
             if self.training and torch.rand(1).item() < self.layer_dropout:
-                pass
+                skip_count += 1
+                continue
             else:
-                x_ = preattn_norm(x)
-                x = attn(x_) + x
-                self.context_scores.append(attn.context_scores)
-                x_ = preff_norm(x)
-                x = ff(x_) + x
-        x = self.norm(x)
-        return x
+                x = self.dropout(attn(preattn_norm(x))) + x
+                if not self.training:
+                    self.context_scores.append(attn.context_scores)
+                x = self.dropout(ff(preff_norm(x))) + x
+        if skip_count == len(self.layers):
+            return x
+        else:
+            x = self.norm(x)
+            return x
 
 
 class MobileViTBlockv2(nn.Module):
@@ -367,12 +352,15 @@ class MobileViTBlockv2(nn.Module):
         embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
         depth: 可分离自注意力头的堆叠个数
         channel: 输入通道
-        hid_dim: LinearTransformer中FeedForward第一个卷积后的通道数
-        patch_size: Transformer一个patch的边长
+        hid_dim: LinearTransformer中FeedForward的隐藏层的神经元数
+        patch_size: LinearTransformer一个patch的边长（图像块边长）
         kernel_size: 局部表征模块卷积核大小
-        dropout: LinearTransformer中FeedForward的dropout概率
+        attn_drop: LinearTransformer中的上下文分数context_scores的dropout概率
+        ff_dropout: LinearTransformer中FeedForward的dropout概率
+        dropout: LinearTransformer中经过注意力模块后以及前馈神经网络后的dropout概率
+        layer_dropout: 跳过LinearTransformer的概率
     '''
-    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, attn_drop=0.0, ff_dropout = 0.0, dropout=0.1, layer_dropout=0.):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
@@ -386,7 +374,7 @@ class MobileViTBlockv2(nn.Module):
             nn.Conv2d(embed_dim, channel, 1, 1, 0, bias=False),
             nn.BatchNorm2d(channel)
         )
-        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, attn_drop=attn_drop, ff_dropout=ff_dropout, dropout=dropout, layer_dropout=layer_dropout)
 
 
     def forward(self, x):
@@ -395,7 +383,7 @@ class MobileViTBlockv2(nn.Module):
         x = self.conv_1x1_in(x)
 
         # Unfold
-        # [B, C, H, W] --> [B, d, P, N]
+        # [B, d, H, W] --> [B, d, P, N]
         self.batch_size, in_channels, self.img_h, self.img_w = x.shape
         patches = F.unfold(
             x,
@@ -410,7 +398,7 @@ class MobileViTBlockv2(nn.Module):
         patches = self.transformer(patches)
 
         # Fold
-        # [B, d, P, N] --> [B, C, H, W]
+        # [B, d, P, N] --> [B, d, H, W]
         batch_size, in_dim, patch_size, n_patches = patches.shape
         patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
         x = F.fold(
@@ -445,8 +433,359 @@ class MobileViTBlockv2(nn.Module):
 
         # 计算归一化，避免除零错误
         y = (y - y_min) / (y_max - y_min + epsilon)
+        y = torch.split(y.squeeze(),1, dim=0) if y.shape[0] > 1 else (y[0])
+        return y
+
+
+class MobileViTBlockv3(nn.Module):
+    '''
+    Args:
+        embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
+        depth: 可分离自注意力头的堆叠个数
+        channel: 输入通道
+        hid_dim: LinearTransformer中FeedForward第一个卷积后的通道数
+        patch_size: Transformer一个patch的边长
+        kernel_size: 局部表征模块卷积核大小
+        dropout: LinearTransformer中FeedForward的dropout概率
+    '''
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
+        super().__init__()
+        self.ph = patch_size
+        self.pw = patch_size
+        self.conv_3x3_in = nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False),
+                nn.BatchNorm2d(channel),
+                nn.SiLU()
+            )
+        self.conv_1x1_in = nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        self.conv_1x1_out = nn.Sequential(
+            nn.Conv2d(2 * embed_dim, channel, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(channel),
+            nn.SiLU()
+        )
+        self.norm_out = nn.BatchNorm2d(channel)
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
+
+
+    def forward(self, x):
+        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
+        x_pre = self.conv_3x3_in(x)
+        x_unfold = self.conv_1x1_in(x_pre)
+
+        # Unfold
+        # [B, C, H, W] --> [B, d, P, N]
+        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
+        patches = F.unfold(
+            x_unfold,
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        patches = patches.reshape(
+            self.batch_size, in_channels, self.ph * self.pw, -1
+        )
+
+        # learn global representations on all patches
+        patches = self.transformer(patches)
+
+        # Fold
+        # [B, d, P, N] --> [B, C, H, W]
+        batch_size, in_dim, patch_size, n_patches = patches.shape
+        patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
+        x_flod = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        # Fusion block
+        x_out = torch.cat((x_flod, x_unfold), 1)
+        return self.norm_out(self.conv_1x1_out(x_out) + x)
+
+    def get_score(self):
+        assert self.batch_size == 1
+
+        context_scores = torch.cat(self.transformer.context_scores, dim=0)
+        # [d, 1, P, N]
+        batch_size, in_dim, patch_size, n_patches = context_scores.shape
+        assert in_dim == 1
+        # [d, 1, P, N] --> [d, P, N]
+        patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
+        # [d, P, N] --> [d, 1, H, W]
+        y = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        epsilon = 1e-5
+        y_min = y.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        y_max = y.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+
+        # 计算归一化，避免除零错误
+        y = (y - y_min) / (y_max - y_min + epsilon)
         y = torch.split(y.squeeze(),1, dim=0)
         return y
+
+
+class MobileViTBlockv4(nn.Module):
+    '''
+    Args:
+        embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
+        depth: 可分离自注意力头的堆叠个数
+        channel: 输入通道
+        hid_dim: LinearTransformer中FeedForward第一个卷积后的通道数
+        patch_size: Transformer一个patch的边长
+        kernel_size: 局部表征模块卷积核大小
+        dropout: LinearTransformer中FeedForward的dropout概率
+    '''
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
+        super().__init__()
+        self.ph = patch_size
+        self.pw = patch_size
+        self.conv_3x3_in = nn.Sequential(
+                nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False),
+                nn.BatchNorm2d(channel),
+                nn.SiLU()
+            )
+        self.conv_1x1_in = nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        self.conv_1x1_out = nn.Sequential(
+            nn.Conv2d(2 * embed_dim, channel, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(channel),
+            nn.SiLU()
+        )
+        self.norm_out = nn.BatchNorm2d(channel)
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
+
+
+    def forward(self, x):
+        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
+        x_pre = self.conv_3x3_in(x)
+        x_unfold = self.conv_1x1_in(x_pre)
+
+        # Inner Patch Attention
+        # Unfold
+        # [B, d, H, W] --> [B*N, d, H//PH, W//PW]
+        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
+        x_unfold = x_unfold.view(self.batch_size, in_channels,
+                                 self.img_h // self.ph, self.ph,
+                                 self.img_w // self.pw, self.pw)
+        patches = x_unfold.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, in_channels, self.ph, self.pw)
+        patches_shape = patches.shape
+        # 每个patch内做像素级注意力
+        # [B*N, d, H/P, W/P] --> [B*N, d, 1, N]
+        patches = F.unfold(
+            patches,
+            kernel_size=1,
+            stride=1
+        )
+        patches = patches.reshape(
+            patches_shape[0], in_channels, 1, -1
+        )
+
+        # learn pixel representations in each patches
+        # [B*N, d, 1, N]
+        patches = self.transformer(patches)
+
+        # [B*N, d, 1, N] --> [B*N, d, H/P, W/P]
+
+        # Cross Patch Attention
+
+
+
+
+        # Fold
+        # [B, d, P, N] --> [B, C, H, W]
+        batch_size, in_dim, patch_size, n_patches = patches.shape
+        patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
+        x_flod = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+
+        return
+
+    def get_score(self):
+        assert self.batch_size == 1
+
+        context_scores = torch.cat(self.transformer.context_scores, dim=0)
+        # [d, 1, P, N]
+        batch_size, in_dim, patch_size, n_patches = context_scores.shape
+        assert in_dim == 1
+        # [d, 1, P, N] --> [d, P, N]
+        patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
+        # [d, P, N] --> [d, 1, H, W]
+        y = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        epsilon = 1e-5
+        y_min = y.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        y_max = y.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+
+        # 计算归一化，避免除零错误
+        y = (y - y_min) / (y_max - y_min + epsilon)
+        y = torch.split(y.squeeze(),1, dim=0)
+        return y
+
+
+class ConvMixer(nn.Module):
+    def __init__(self, c1, c2, depth, kernel_size=3, patch_size=3, reduction=16):
+        super(ConvMixer, self).__init__()
+        if c2 != c1:
+            c2 = c1
+        self.DConvN = nn.Sequential(
+            nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
+            nn.GELU(),
+            nn.BatchNorm2d(c2),
+            *[nn.Sequential(
+                Residual(nn.Sequential(
+                    nn.Conv2d(c2, c2, kernel_size, groups=c2, padding=1),
+                    nn.GELU(),
+                    nn.BatchNorm2d(c2)
+                )),
+                nn.Conv2d(c2, c1, kernel_size=1),
+                nn.GELU(),
+                nn.BatchNorm2d(c2)
+            ) for i in range(depth)]
+        )
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(c2, c2 // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(c2 // reduction, c2, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.DConvN(x)
+        y = self.avg_pool(y).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        y = torch.exp(y)
+        return x * y.expand_as(x)
+
+
+class Residual(nn.Module):
+    def __init__(self, fn):
+        super(Residual, self).__init__()
+        self.fn = fn
+
+    def forward(self, x):
+        return self.fn(x) + x
+
+
+class SEAM(nn.Module):
+    def __init__(self, c1, c2, n=1, reduction=16):
+        super(SEAM, self).__init__()
+        if c2 != c1:
+            c2 = c1
+        self.DCovN = nn.Sequential(
+            *[nn.Sequential(
+                # 深度可分离卷积
+                Residual(nn.Sequential(
+                    nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=3, stride=1, padding=1, groups=c2),
+                    nn.GELU(),
+                    nn.BatchNorm2d(c2)
+                )),
+                # 逐点卷积进行多通道融合
+                nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
+                nn.GELU(),
+                nn.BatchNorm2d(c2)
+            ) for i in range(n)]
+        )
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(c2, c2 // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(c2 // reduction, c2, bias=False),
+            nn.Sigmoid()
+        )
+
+        self._initialize_weights()
+        self.initialize_layer(self.fc)
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y = self.DCovN(x)
+        y = self.avg_pool(y).view(b, c)
+        y = self.fc(y).view(b, c, 1, 1)
+        y = torch.exp(y)
+        return x * y.expand_as(x)
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.xavier_uniform_(m.weight, gain=1)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+
+    def initialize_layer(self, layer):
+        if isinstance(layer, (nn.Conv2d, nn.Linear)):
+            torch.nn.init.normal_(layer.weight, mean=0., std=0.001)
+            if layer.bias is not None:
+                torch.nn.init.constant_(layer.bias, 0)
+
+
+class MultiSEAM(nn.Module):
+    def __init__(self, c1, depth, kernel_size=3, patch_size=[6, 7, 8], reduction=16):
+        super(MultiSEAM, self).__init__()
+        c2 = c1
+        def DcovN(c1, c2, depth, kernel_size=3, patch_size=3):
+            return nn.Sequential(
+                # Patch Embedding
+                nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
+                nn.SiLU(),
+                nn.BatchNorm2d(c2),
+                *[nn.Sequential(
+                    # 深度可分离卷积
+                    Residual(nn.Sequential(
+                        nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=kernel_size, stride=1, padding=1,
+                                  groups=c2),
+                        nn.SiLU(),
+                        nn.BatchNorm2d(c2)
+                    )),
+                    # 逐点卷积
+                    nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
+                    nn.SiLU(),
+                    nn.BatchNorm2d(c2)
+                ) for i in range(depth)]
+            )
+
+        self.DCovN0 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[0])
+        self.DCovN1 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[1])
+        self.DCovN2 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[2])
+        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
+        self.fc = nn.Sequential(
+            nn.Linear(c2, c2 // reduction, bias=False),
+            nn.ReLU(inplace=True),
+            nn.Linear(c2 // reduction, c2, bias=False),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        b, c, _, _ = x.size()
+        y0 = self.DCovN0(x)
+        y1 = self.DCovN1(x)
+        y2 = self.DCovN2(x)
+
+        y0 = self.avg_pool(y0).view(b, c)
+        y1 = self.avg_pool(y1).view(b, c)
+        y2 = self.avg_pool(y2).view(b, c)
+        y3 = self.avg_pool(x).view(b, c)
+
+        y = (y0 + y1 + y2 + y3) / 4.0
+        y = self.fc(y).view(b, c, 1, 1)
+        y = torch.exp(y)
+        return x * y.expand_as(x)
+
+
+#####################################################################
+
 
 class TridentBlock(nn.Module):
     def __init__(self, c1, c2, stride=1, c=False, e=0.5, padding=[1, 2, 3], dilate=[1, 2, 3], bias=False):
@@ -537,6 +876,7 @@ class TridentBlock(nn.Module):
         base_feat.append(x3)
         return base_feat
 
+
 class RFEM(nn.Module):
     def __init__(self, c1, c2, n=1, e=0.5, stride=1):
         super(RFEM, self).__init__()
@@ -558,159 +898,6 @@ class RFEM(nn.Module):
         return out
 
 
-class ConvMixer(nn.Module):
-    def __init__(self, c1, c2, depth, kernel_size=3, patch_size=4, reduction=16):
-        super(ConvMixer, self).__init__()
-        if c1 != c2:
-            c2 = c1
-        self.DConvN = nn.Sequential(
-            nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
-            nn.GELU(),
-            nn.BatchNorm2d(c2),
-            *[nn.Sequential(
-                Residual(nn.Sequential(
-                    nn.Conv2d(c2, c2, kernel_size, groups=c2, padding=1),
-                    nn.GELU(),
-                    nn.BatchNorm2d(c2)
-                )),
-                nn.Conv2d(c2, c1, kernel_size=1),
-                nn.GELU(),
-                nn.BatchNorm2d(c2)
-            ) for i in range(depth)]
-        )
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(c2, c2 // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c2 // reduction, c2, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.DConvN(x)
-        y = self.avg_pool(y).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        y = torch.exp(y)
-        return x * y.expand_as(x)
-
-class Residual(nn.Module):
-    def __init__(self, fn):
-        super(Residual, self).__init__()
-        self.fn = fn
-
-    def forward(self, x):
-        return self.fn(x) + x
-
-class SEAM(nn.Module):
-    def __init__(self, c1, c2, n, reduction=16):
-        super(SEAM, self).__init__()
-        if c1 != c2:
-            c2 = c1
-        self.DCovN = nn.Sequential(
-            *[nn.Sequential(
-                # 深度可分离卷积
-                Residual(nn.Sequential(
-                    nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=3, stride=1, padding=1, groups=c2),
-                    nn.GELU(),
-                    nn.BatchNorm2d(c2)
-                )),
-                # 逐点卷积进行多通道融合
-                nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
-                nn.GELU(),
-                nn.BatchNorm2d(c2)
-            ) for i in range(n)]
-        )
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(c2, c2 // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c2 // reduction, c2, bias=False),
-            nn.Sigmoid()
-        )
-
-        self._initialize_weights()
-        self.initialize_layer(self.fc)
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y = self.DCovN(x)
-        y = self.avg_pool(y).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
-        y = torch.exp(y)
-        return x * y.expand_as(x)
-
-    def _initialize_weights(self):
-        for m in self.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.xavier_uniform_(m.weight, gain=1)
-            elif isinstance(m, nn.BatchNorm2d):
-                nn.init.constant_(m.weight, 1)
-                nn.init.constant_(m.bias, 0)
-
-    def initialize_layer(self, layer):
-        if isinstance(layer, (nn.Conv2d, nn.Linear)):
-            torch.nn.init.normal_(layer.weight, mean=0., std=0.001)
-            if layer.bias is not None:
-                torch.nn.init.constant_(layer.bias, 0)
-
-
-class MultiSEAM(nn.Module):
-    def __init__(self, c1, c2, depth, kernel_size=3, patch_size=[6, 7, 8], reduction=16):
-        super(MultiSEAM, self).__init__()
-        if c1 != c2:
-            c2 = c1
-
-        def DcovN(c1, c2, depth, kernel_size=3, patch_size=3):
-            return nn.Sequential(
-                # Patch Embedding
-                nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
-                nn.SiLU(),
-                nn.BatchNorm2d(c2),
-                *[nn.Sequential(
-                    # 深度可分离卷积
-                    Residual(nn.Sequential(
-                        nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=kernel_size, stride=1, padding=1,
-                                  groups=c2),
-                        nn.SiLU(),
-                        nn.BatchNorm2d(c2)
-                    )),
-                    # 逐点卷积
-                    nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
-                    nn.SiLU(),
-                    nn.BatchNorm2d(c2)
-                ) for i in range(depth)]
-            )
-
-        self.DCovN0 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[0])
-        self.DCovN1 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[1])
-        self.DCovN2 = DcovN(c1, c2, depth, kernel_size=kernel_size, patch_size=patch_size[2])
-        self.avg_pool = torch.nn.AdaptiveAvgPool2d(1)
-        self.fc = nn.Sequential(
-            nn.Linear(c2, c2 // reduction, bias=False),
-            nn.ReLU(inplace=True),
-            nn.Linear(c2 // reduction, c2, bias=False),
-            nn.Sigmoid()
-        )
-
-    def forward(self, x):
-        b, c, _, _ = x.size()
-        y0 = self.DCovN0(x)
-        y1 = self.DCovN1(x)
-        y2 = self.DCovN2(x)
-
-        y0 = self.avg_pool(y0).view(b, c)
-        y1 = self.avg_pool(y1).view(b, c)
-        y2 = self.avg_pool(y2).view(b, c)
-        y3 = self.avg_pool(x).view(b, c)
-
-        y = (y0 + y1 + y2 + y3) / 4.0
-        y = self.fc(y).view(b, c, 1, 1)
-        y = torch.exp(y)
-        return x * y.expand_as(x)
-
-#####################################################################
-
 class C3RFEM(nn.Module):
     def __init__(self, c1, c2, n=1, shortcut=True, e=0.5):  # ch_in, ch_out, number, shortcut, groups, expansion
         super().__init__()
@@ -725,6 +912,7 @@ class C3RFEM(nn.Module):
 
     def forward(self, x):
         return self.cv3(torch.cat((self.m(self.cv1(x)), self.cv2(x)), dim=1))
+
 
 class DFL(nn.Module):
     """

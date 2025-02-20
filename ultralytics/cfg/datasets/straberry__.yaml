@@ -1,4 +1,4 @@
-path: D:/Yolov11/datasets/split_whole_7-3 # dataset root dir
+path: D:/Yolov11/datasets/split_whole__7-2-1 # dataset root dir
 train: images/train
 val: images/val
 test: images/test
@@ -7,5 +7,4 @@ test: images/test
 names:
   0: ripe
   1: unripe
-  2: bad
-  3: flower
+  2: flower

@@ -6,6 +6,7 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 __all__ = (
     "Conv",
@@ -74,7 +75,7 @@ class Conv2(Conv):
         """Fuse parallel convolutions."""
         w = torch.zeros_like(self.conv.weight.data)
         i = [x // 2 for x in w.shape[2:]]
-        w[:, :, i[0] : i[0] + 1, i[1] : i[1] + 1] = self.cv2.weight.data.clone()
+        w[:, :, i[0]: i[0] + 1, i[1]: i[1] + 1] = self.cv2.weight.data.clone()
         self.conv.weight.data += w
         self.__delattr__("cv2")
         self.forward = self.forward_fuse
@@ -330,3 +331,25 @@ class Concat(nn.Module):
     def forward(self, x):
         """Forward pass for the YOLOv8 mask Proto module."""
         return torch.cat(x, self.d)
+
+
+class WeightedConcat(nn.Module):
+    """Concatenate a list of tensors along dimension with weights."""
+
+    def __init__(self, features_num, dimension=1, epsilon=1e-7):
+        """Concatenates a list of tensors along a specified dimension with weights."""
+        super().__init__()
+        self.features_num = features_num
+        self.d = dimension
+        self.weights = nn.Parameter(torch.ones(features_num, dtype=torch.float32), requires_grad=True)
+        self.epsilon = epsilon
+
+    def forward(self, x):
+        assert len(x) == self.features_num
+        w = F.relu(self.weights, False)
+        w = w / (torch.sum(w, dim=0) / self.features_num + self.epsilon)
+        # concat_list = []
+        # for i, x_ in enumerate(x):
+        #     concat_list.append(w[i] * x_)
+        # return torch.cat(concat_list, self.d)
+        return torch.cat([w_ * x_ for w_, x_ in zip(w, x)], self.d)

@@ -368,7 +368,7 @@ class BasePredictor:
                     seaborn.heatmap(score_feature, xticklabels=False, yticklabels=False, cbar=False, cmap='seismic')
                     # plt.imshow(score_feature, cmap='hot', interpolation='nearest')
                     plt.tight_layout(pad=0.0)
-                    plt.savefig(self.save_dir / p.name[:-4]/ f'MVIT_Block{block_idx}_Score{score_idx}.png')
+                    plt.savefig(self.save_dir / p.name[:-4]/ f'MVIT_Block{block_idx + 1}_Score{score_idx + 1}.png')
                     plt.close()
 
         # Save results
