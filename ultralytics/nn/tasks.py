@@ -68,6 +68,8 @@ from ultralytics.nn.modules import (
     MultiSEAM,
     MobileViTBlockv2,
     MobileViTBlockv3,
+    MobileViTBlockv4,
+    MobileViTBlockv5,
     ConvMixer,
     WeightedConcat
 )
@@ -1097,7 +1099,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             if d_c != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
                 d_c = make_divisible(min(d_c, max_channels) * width, 8)
             args = [dim, args[1], d_c, *args[2:]]
-        elif m in {MobileViTBlockv2, MobileViTBlockv3}:
+        elif m in {MobileViTBlockv2, MobileViTBlockv3, MobileViTBlockv4, MobileViTBlockv5}:
             dim, c2, hid_dim = args[0], ch[f], args[2]
             dim = make_divisible(dim * width, divisor=8)
             hid_dim = make_divisible(hid_dim * width, divisor=8)

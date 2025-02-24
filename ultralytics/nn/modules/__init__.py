@@ -62,6 +62,8 @@ from .block import (
     MultiSEAM,
     MobileViTBlockv2,
     MobileViTBlockv3,
+    MobileViTBlockv4,
+    MobileViTBlockv5,
     ConvMixer
 )
 from .conv import (

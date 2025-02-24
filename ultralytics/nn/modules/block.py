@@ -1,9 +1,11 @@
 # Ultralytics YOLO 🚀, AGPL-3.0 license
 """Block modules."""
+import math
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import flash_attn as Fa
 
 from ultralytics.utils.torch_utils import fuse_conv_and_bn
 
@@ -56,70 +58,339 @@ __all__ = (
     'MultiSEAM',
     'MobileViTBlockv2',
     'MobileViTBlockv3',
+    'MobileViTBlockv4',
+    'MobileViTBlockv5',
 )
+
+
 #####################################################################
-class PreNorm(nn.Module):
-    def __init__(self, dim, fn = None):
+class MultiHeadAttention(nn.Module):
+    def __init__(self, embed_dim, num_heads=8, dropout=0., use_flash_attn=False, use_pytorch_attn=False):
         super().__init__()
-        self.norm = nn.LayerNorm(dim)
-        self.fn = fn
+        assert embed_dim % num_heads == 0
 
-    def forward(self, x, **kwargs):
-        if self.fn is None:
-            return self.norm(x)
-        else:
-            return self.fn(self.norm(x), **kwargs)
+        self.head_dim = embed_dim // num_heads
+        self.embed_dim = embed_dim
+        self.scale = self.head_dim ** -0.5
+        self.num_heads = num_heads
+        self.dropout = dropout
+        assert (use_flash_attn is False and use_pytorch_attn is False) or use_flash_attn != use_pytorch_attn
+        self.use_flash_attn = use_flash_attn
+        self.use_pytorch_attn = use_pytorch_attn
 
-
-class Attention_M(nn.Module):
-    def __init__(self, dim, heads=8, dim_head=64, dropout=0.):
-        super().__init__()
-        inner_dim = dim_head * heads
-        project_out = not (heads == 1 and dim_head == dim)
-
-        self.heads = heads
-        self.scale = dim_head ** -0.5
-
-        self.attend = nn.Softmax(dim=-1)
-        self.to_qkv = nn.Linear(dim, inner_dim * 3, bias=False)
-
-        self.to_out = nn.Sequential(
-            nn.Linear(inner_dim, dim),
-            nn.Dropout(dropout)
-        ) if project_out else nn.Identity()
+        self.qkv_proj = nn.Linear(embed_dim, embed_dim * 3, bias=True)
+        self.softmax = nn.Softmax(dim=-1)
+        self.attn_drop = nn.Dropout(p=dropout)
+        self.out_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim, bias=True),
+            nn.Dropout(p=dropout)
+        )
 
     def forward(self, x):
-        qkv = self.to_qkv(x).chunk(3, dim=-1)
-        q, k, v = map(lambda t: rearrange(t, 'b p n (h d) -> b p h n d', h=self.heads), qkv)
+        if self.use_pytorch_attn:
+            out, _ = F.multi_head_attention_forward(
+                query=x,
+                key=x,
+                value=x,
+                embed_dim_to_check=self.embed_dim,
+                num_heads=self.num_heads,
+                in_proj_weight=torch.empty([0]),
+                in_proj_bias=self.qkv_proj.bias,
+                bias_k=None,
+                bias_v=None,
+                add_zero_attn=False,
+                dropout_p=self.attn_drop.p,
+                out_proj_weight=self.out_proj.weight,
+                out_proj_bias=self.out_proj.bias,
+                training=self.training,
+                key_padding_mask=None,
+                need_weights=False,
+                attn_mask=None,
+                use_separate_proj_weight=True,
+                q_proj_weight=self.qkv_proj.weight[: self.embed_dim, ...],
+                k_proj_weight=self.qkv_proj.weight[
+                              self.embed_dim: 2 * self.embed_dim, ...
+                              ],
+                v_proj_weight=self.qkv_proj.weight[2 * self.embed_dim:, ...],
+            )
+            return out
+        else:
+            # [B*P, N, d]
+            b_sz, s_len, in_channels = x.shape
 
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        attn = self.attend(dots)
-        out = torch.matmul(attn, v)
-        out = rearrange(out, 'b p h n d -> b p n (h d)')
-        return self.to_out(out)
+            # [B*P, N, d] --> [B*P, N, 3*d] --> [B*P, N, 3, h_n, d // h_n]
+            qkv = self.qkv_proj(x).reshape(b_sz, s_len, 3, self.num_heads, -1)
+
+            if self.use_flash_attn and x.device.type != 'cpu':
+                # [B*P, N, 3, h_n, d // h_n] --> [B*P, N, h_n, d // h_n] x 3
+                query, key, value = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+                if self.training:
+                    # [B * P, N, h_n, d // h_n]
+                    out = Fa.flash_attn_func(query, key, value, self.dropout, self.scale)
+                else:
+                    # [B * P, N, h_n, d // h_n]
+                    out = Fa.flash_attn_func(query, key, value, 0.0, self.scale)
+            else:
+                # [B*P, N, 3, h_n, d // h_n] --> [B*P, h_n, 3, N, d // h_n]
+                qkv = qkv.transpose(1, 3).contiguous()
+                # [B*P, h_n, 3, N, d // h_n] --> [B*P, h_n, N, d // h_n] x 3
+                query, key, value = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+                query = query * self.scale
+
+                # K^T
+                # [B*P, h_n, N, d // h_n] --> [B*P, h_n, d // h_n, N]
+                key = key.transpose(-1, -2)
+
+                # Q*K^T
+                # [B*P, h_n, N, d // h_n] x [B*P, h_n, d // h_n, N] --> [B*P, h_n, N, N]
+                attn = torch.matmul(query, key)
+
+                attn_dtype = attn.dtype
+                attn_as_float = self.softmax(attn.float())
+                attn = attn_as_float.to(attn_dtype)
+                attn = self.attn_drop(attn)
+
+                # weighted sum
+                # [B*P, h_n, N, N] x [B*P, h_n, N, d // h_n] --> [B*P, h_n, N, d // h_n]
+                out = torch.matmul(attn, value)
+
+                # [B*P, h_n, N, d // h_n] --> [B*P, N, h_n, d // h_n]
+                out = out.transpose(1, 2)
+
+            return self.out_proj(out.reshape(b_sz, s_len, -1))
+
+
+class SingleHeadAttention(nn.Module):
+    def __init__(self, embed_dim, dropout=0., use_flash_attn=False, use_pytorch_attn=False):
+        super().__init__()
+
+        self.head_dim = embed_dim
+        self.embed_dim = embed_dim
+        self.scale = self.embed_dim ** -0.5
+        self.dropout = dropout
+        assert (use_flash_attn is False and use_pytorch_attn is False) or use_flash_attn != use_pytorch_attn
+        self.use_flash_attn = use_flash_attn
+        self.use_pytorch_attn = use_pytorch_attn
+
+        self.qkv_proj = nn.Linear(embed_dim, embed_dim * 3, bias=True)
+        self.softmax = nn.Softmax(dim=-1)
+        self.attn_drop = nn.Dropout(p=dropout)
+        self.out_proj = nn.Sequential(
+            nn.Linear(embed_dim, embed_dim, bias=True),
+            nn.Dropout(p=dropout)
+        )
+
+    def forward(self, x):
+        if self.use_pytorch_attn:
+            out, _ = F.multi_head_attention_forward(
+                query=x,
+                key=x,
+                value=x,
+                embed_dim_to_check=self.embed_dim,
+                num_heads=self.num_heads,
+                in_proj_weight=torch.empty([0]),
+                in_proj_bias=self.qkv_proj.bias,
+                bias_k=None,
+                bias_v=None,
+                add_zero_attn=False,
+                dropout_p=self.attn_drop.p,
+                out_proj_weight=self.out_proj.weight,
+                out_proj_bias=self.out_proj.bias,
+                training=self.training,
+                key_padding_mask=None,
+                need_weights=False,
+                attn_mask=None,
+                use_separate_proj_weight=True,
+                q_proj_weight=self.qkv_proj.weight[: self.embed_dim, ...],
+                k_proj_weight=self.qkv_proj.weight[
+                              self.embed_dim: 2 * self.embed_dim, ...
+                              ],
+                v_proj_weight=self.qkv_proj.weight[2 * self.embed_dim:, ...],
+            )
+            return out
+        else:
+            if self.use_flash_attn and x.device.type != 'cpu':
+                # [B*P, N, d]
+                b_sz, s_len, in_channels = x.shape
+                # [B*P, N, d] --> [B*P, N, 3*d] --> [B*P, N, 3, 1, d]
+                qkv = self.qkv_proj(x).reshape(b_sz, s_len, 3, 1, in_channels)
+                # [B*P, N, 3, 1, d] --> [B*P, N, 1, d] x 3
+                query, key, value = qkv[:, :, 0], qkv[:, :, 1], qkv[:, :, 2]
+                if self.training:
+                    d = self.dropout
+                else:
+                    d = 0.0
+                # [B * P, N, 1, d]
+                out = Fa.flash_attn_func(query, key, value, d, self.scale)
+            else:
+                # [B*P, N, d] --> [B*P, N, 3*d]
+                qkv = self.qkv_proj(x)
+                # [B*P, N, 3*d] --> [B*P, N, d] x 3
+                query, key, value = torch.chunk(qkv, 3, -1)
+                query = query * self.scale
+
+                # K^T
+                # [B*P, N, d] --> [B*P, d, N]
+                key = key.transpose(-1, -2)
+
+                # Q*K^T
+                # [B*P, N, d] x [B*P, d, N] --> [B*P, N, N]
+                attn = torch.matmul(query, key)
+
+                attn_dtype = attn.dtype
+                attn_as_float = self.softmax(attn.float())
+                attn = attn_as_float.to(attn_dtype)
+                attn = self.attn_drop(attn)
+
+                # weighted sum
+                # [B*P, N, N] x [B*P, N, d] --> [B*P, N, d]
+                out = torch.matmul(attn, value)
+
+            return self.out_proj(out.squeeze())
 
 
 class Transformer(nn.Module):
-    def __init__(self, dim, depth, heads, dim_head, mlp_dim, dropout=0.):
+    def __init__(self, embed_dim, hid_dim, depth, num_heads, attn_dropout=0., ffn_dropout=0.):
         super().__init__()
         self.layers = nn.ModuleList([])
+        self.norm = nn.LayerNorm(embed_dim)
+        attn_unit = SingleHeadAttention(embed_dim, attn_dropout)
+        if num_heads > 1:
+            attn_unit = MultiHeadAttention(embed_dim, num_heads, attn_dropout)
+
+        ffn_unit = nn.Sequential(
+            nn.Linear(embed_dim, hid_dim, True),
+            nn.SiLU(),
+            nn.Dropout(p=ffn_dropout),
+            nn.Linear(hid_dim, embed_dim, True),
+            nn.Dropout(p=ffn_dropout)
+        )
         for _ in range(depth):
             self.layers.append(nn.ModuleList([
-                PreNorm(dim, Attention_M(dim, heads, dim_head, dropout)),
-                PreNorm(dim, FeedForward(dim, mlp_dim, dropout))
+                nn.Sequential(
+                    nn.LayerNorm(embed_dim),
+                    attn_unit
+                ),
+                nn.Sequential(
+                    nn.LayerNorm(embed_dim),
+                    ffn_unit
+                )
             ]))
 
     def forward(self, x):
         for attn, ff in self.layers:
             x = attn(x) + x
             x = ff(x) + x
-        return x
+        return self.norm(x)
+
+
+class MobileViTBlockv4(nn.Module):
+    def __init__(self, embed_dim, depth, channel, hid_dim, num_heads, patch_size, kernel_size=3,
+                 attn_drop=0.0, ff_dropout=0.0):
+        super().__init__()
+        self.ph = patch_size
+        self.pw = patch_size
+        self.local_rep = nn.Sequential(
+            nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False, groups=channel),
+            nn.BatchNorm2d(channel),
+            nn.SiLU(),
+            nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        )
+        self.conv_1x1_out = nn.Sequential(
+            nn.Conv2d(embed_dim, embed_dim, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(embed_dim),
+            nn.SiLU()
+        )
+        self.fusion_conv = nn.Sequential(
+            nn.Conv2d(2 * embed_dim, channel, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(channel),
+            nn.SiLU()
+        )
+        self.transformer = Transformer(embed_dim, hid_dim, depth, num_heads, attn_drop, ff_dropout)
+
+        self._initialize_weights()
+
+    def forward(self, x):
+        # local rep
+        # [B, C, H, W] --> [B, d, H, W]
+        x_local = x_unfold = self.local_rep(x)
+
+        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
+
+        # Resize if necessary
+        do_resize = False
+        new_img_h = int(math.ceil(self.img_h / self.ph) * self.ph)
+        new_img_w = int(math.ceil(self.img_w / self.pw) * self.pw)
+        if self.img_h != new_img_h or self.img_w != new_img_w:
+            # Note: Padding can be done, but then it needs to be handled in attention function.
+            x_unfold = F.interpolate(
+                x_unfold,
+                size=(new_img_h, new_img_w),
+                mode="bilinear",
+                align_corners=False
+            )
+            do_resize = True
+
+        # Unfold
+        # [B, d, H, W] --> [B, d, P, N]
+        patches = F.unfold(
+            x_unfold,
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        patches = patches.reshape(
+            self.batch_size, in_channels, self.ph * self.pw, -1
+        )
+
+        # [B, d, P, N] --> [B*P, N, d]
+        _, _, patch_size, n_patches = patches.shape
+        patches = patches.permute(0, 2, 3, 1).reshape(-1, n_patches, in_channels)
+
+        # learn global representations on all patches
+        patches = self.transformer(patches)
+
+        # [B*P, N, d] --> [B, d, P, N]
+        patches = patches.reshape(self.batch_size, self.ph * self.pw, n_patches, -1).permute(0, 3, 1, 2)
+
+        # Fold
+        # [B, d, P, N] --> [B, d, H, W]
+        patches = patches.reshape(self.batch_size, in_channels * patch_size, n_patches)
+        x_fold = F.fold(
+            patches,
+            output_size=(new_img_h, new_img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+
+        if do_resize:
+            x_fold = F.interpolate(
+                x_fold,
+                size=(self.img_h, self.img_w),
+                mode="bilinear",
+                align_corners=False,
+            )
+
+        # [B, d, H, W]
+        x_fold = self.conv_1x1_out(x_fold)
+
+        # Fusion + ResConnect
+        return self.fusion_conv(torch.cat([x_fold, x_local], 1)) + x
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Sequential):
+                for m_ in m:
+                    if isinstance(m_, nn.Conv2d):
+                        nn.init.kaiming_normal_(m_.weight, mode="fan_out")
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
 
 
 class MobileViTBlock(nn.Module):
     # CSDN 迪菲赫尔曼
     def __init__(self, dim, depth, channel, kernel_size, patch_size, mlp_dim, dropout=0.):
         super().__init__()
+
         def conv_nxn_bn(inp, oup, kernal_size=3, stride=1):
             return nn.Sequential(
                 nn.Conv2d(inp, oup, kernal_size, stride, 1, bias=False),
@@ -139,7 +410,7 @@ class MobileViTBlock(nn.Module):
         self.conv1 = conv_nxn_bn(channel, channel, kernel_size)
 
         self.conv2 = conv_1x1_bn(channel, dim)
-        self.transformer = Transformer(dim, depth, 4, 8, mlp_dim, dropout)
+        # self.transformer = Transformer(dim, mlp_dim, depth, 4, dropout) #todo
         self.conv3 = conv_1x1_bn(dim, channel)
         self.conv4 = conv_nxn_bn(2 * channel, channel, kernel_size)
 
@@ -197,7 +468,7 @@ class MV2Block(nn.Module):
                 nn.SiLU(),
                 # pw-linear
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(oup),
+                nn.BatchNorm2d(oup)
             )
         else:
             self.conv = nn.Sequential(
@@ -210,7 +481,7 @@ class MV2Block(nn.Module):
                 nn.SiLU(),
                 # pw-linear
                 nn.Conv2d(hidden_dim, oup, 1, 1, 0, bias=False),
-                nn.BatchNorm2d(oup),
+                nn.BatchNorm2d(oup)
             )
 
     def forward(self, x):
@@ -219,23 +490,107 @@ class MV2Block(nn.Module):
         else:
             return self.conv(x)
 
+
 class FeedForward(nn.Module):
     def __init__(self, dim, hidden_dim, dropout=0.):
         super().__init__()
-        self.conv_in = nn.Sequential(
-                    nn.Conv2d(dim, hidden_dim, 1, 1, 0, bias=True),
-                    nn.SiLU()
+        self.ffn = nn.Sequential(
+            nn.Conv2d(dim, hidden_dim, 1, 1, 0, bias=True),
+            nn.SiLU(),
+            nn.Dropout(p=dropout),
+            nn.Conv2d(hidden_dim, dim, 1, 1, 0, bias=True)
         )
-        self.conv_out = nn.Conv2d(hidden_dim, dim, 1, 1, 0, bias=True)
-        self.dropout = nn.Dropout(p=dropout)
+
+        # self._initialize_weights()
 
     def forward(self, x):
-        x = self.conv_in(x)
-        x = self.dropout(x)
-        return self.conv_out(x)
+        return self.ffn(x)
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Sequential):
+                for m_ in m:
+                    if isinstance(m_, nn.Conv2d):
+                        nn.init.kaiming_normal_(m_.weight, mode="fan_out")
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
 
 
 class LinearSelfAttention(nn.Module):
+    """
+    线性可分离自注意力方法, 具体原理参照论文 `https://arxiv.org/abs/2206.02680`
+    Args:
+        embed_dim (int): :math:`[B, d, P, N]` 中的维度 :math:`d`，就是输入的特征维度
+        attn_drop (float): 可分离自注意力中dropout的概率. 默认值: 0.0
+        proj_drop (float):
+        bias (bool): 线性映射中是否使用偏置. 默认值: True
+    Shape:
+        - Input: :math:`(N, C, P, N)` where :math:`N` is the batch size, :math:`C` is the input channels,
+        :math:`P` is the number of pixels in the patch, and :math:`N` is the number of patches
+        - Output: same as the input
+    """
+
+    def __init__(
+            self,
+            embed_dim: int,
+            attn_drop: float = 0.0,
+            bias: bool = True,
+    ) -> None:
+        super().__init__()
+        self.embed_dim = embed_dim
+        self.ikv_proj = nn.Conv2d(
+            in_channels=embed_dim,
+            out_channels=1 + (2 * embed_dim),
+            bias=bias,
+            kernel_size=1,
+        )
+        self.drop = nn.Dropout(p=attn_drop)
+        self.out_proj = nn.Conv2d(
+            in_channels=embed_dim,
+            out_channels=embed_dim,
+            bias=bias,
+            kernel_size=1,
+        )
+        self.context_scores = None
+
+        # self._initialize_weights()
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # 线性映射
+        # [B, d, P, N] --> [B, 1 + 2d, P, N]
+        ikv = self.ikv_proj(x)
+
+        # 分离出inp,key和value
+        # inp --> [B, 1, P, N]
+        # value, key --> [B, d, P, N]
+        inp, key, value = torch.split(
+            ikv, split_size_or_sections=[1, self.embed_dim, self.embed_dim], dim=1
+        )
+
+        # 上下文分数 --> [B, 1, P, N]
+        context_scores = self.drop(F.softmax(inp, dim=-1))
+        if not self.training:
+            self.context_scores = context_scores.detach().clone()
+
+        # 计算上下文向量
+        # [B, d, P, N] x [B, 1, P, N] -> [B, d, P, N] --> [B, d, P, 1]
+        context_vector = (key * context_scores).sum(dim=-1, keepdim=True)
+
+        # combine context vector with values
+        # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
+        return self.out_proj(F.relu(value) * context_vector.expand_as(value))
+
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Sequential):
+                for m_ in m:
+                    if isinstance(m_, nn.Conv2d):
+                        nn.init.kaiming_normal_(m_.weight, mode="fan_out")
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
+
+
+class FlashSelfAttention(nn.Module):
     """
     线性可分离自注意力方法, 具体原理参照论文 `https://arxiv.org/abs/2206.02680`
     Args:
@@ -285,8 +640,7 @@ class LinearSelfAttention(nn.Module):
         )
 
         # 上下文分数 --> [B, 1, P, N]
-        context_scores = F.softmax(inp, dim=-1)
-        context_scores = self.attn_drop(context_scores)
+        context_scores = self.attn_drop(F.softmax(inp, dim=-1))
         if not self.training:
             self.context_scores = context_scores.detach().clone()
 
@@ -296,9 +650,7 @@ class LinearSelfAttention(nn.Module):
 
         # combine context vector with values
         # [B, d, P, N] * [B, d, P, 1] --> [B, d, P, N]
-        out = F.relu(value) * context_vector.expand_as(value)
-        out = self.out_proj(out)
-        return out
+        return self.out_proj(F.relu(value) * context_vector.expand_as(value))
 
 
 class LinearTransformer(nn.Module):
@@ -309,8 +661,8 @@ class LinearTransformer(nn.Module):
             depth: int,
             attn_drop: float = 0.0,
             ff_dropout: float = 0.0,
-            dropout: float= 0.1,
-            layer_dropout: float = 0.3
+            dropout: float = 0.0,
+            layer_dropout: float = 0.0
     ) -> None:
         super().__init__()
         self.layers = nn.ModuleList([])
@@ -327,8 +679,7 @@ class LinearTransformer(nn.Module):
         self.context_scores = []
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if not self.training:
-            self.context_scores.clear()
+        self.context_scores.clear()
         skip_count = 0
         for preattn_norm, attn, preff_norm, ff in self.layers:
             if self.training and torch.rand(1).item() < self.layer_dropout:
@@ -342,8 +693,7 @@ class LinearTransformer(nn.Module):
         if skip_count == len(self.layers):
             return x
         else:
-            x = self.norm(x)
-            return x
+            return self.norm(x)
 
 
 class MobileViTBlockv2(nn.Module):
@@ -360,31 +710,47 @@ class MobileViTBlockv2(nn.Module):
         dropout: LinearTransformer中经过注意力模块后以及前馈神经网络后的dropout概率
         layer_dropout: 跳过LinearTransformer的概率
     '''
-    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, attn_drop=0.0, ff_dropout = 0.0, dropout=0.1, layer_dropout=0.):
+
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size=3,
+                 attn_drop=0.0, ff_dropout=0.0, dropout=0.0, layer_dropout=0.):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
-        self.conv_3x3_in = nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False),
-                nn.BatchNorm2d(channel),
-                nn.SiLU()
-            )
-        self.conv_1x1_in = nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        # assert self.ph == self.pw
+        self.local_rep = nn.Sequential(
+            nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False, groups=channel),
+            nn.BatchNorm2d(channel),
+            nn.SiLU(),
+            nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        )
         self.conv_1x1_out = nn.Sequential(
             nn.Conv2d(embed_dim, channel, 1, 1, 0, bias=False),
             nn.BatchNorm2d(channel)
         )
-        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, attn_drop=attn_drop, ff_dropout=ff_dropout, dropout=dropout, layer_dropout=layer_dropout)
-
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, attn_drop=attn_drop, ff_dropout=ff_dropout,
+                                             dropout=dropout, layer_dropout=layer_dropout)
+        self._initialize_weights()
 
     def forward(self, x):
-        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
-        x = self.conv_3x3_in(x)
-        x = self.conv_1x1_in(x)
+        # Resize if necessary
+        _, _, img_h, img_w = x.shape
+        if img_h % self.ph != 0 or img_w % self.pw != 0:
+            # Note: Padding can be done, but then it needs to be handled in attention function.
+            new_img_h = int(math.ceil(img_h / self.ph) * self.ph)
+            new_img_w = int(math.ceil(img_w / self.pw) * self.pw)
+            x = F.interpolate(
+                x,
+                size=(new_img_h, new_img_w),
+                mode="bilinear",
+                align_corners=True
+            )
+
+        # local rep
+        x = self.local_rep(x)
+        self.batch_size, in_channels, self.img_h, self.img_w = x.shape
 
         # Unfold
         # [B, d, H, W] --> [B, d, P, N]
-        self.batch_size, in_channels, self.img_h, self.img_w = x.shape
         patches = F.unfold(
             x,
             kernel_size=(self.ph, self.pw),
@@ -399,17 +765,24 @@ class MobileViTBlockv2(nn.Module):
 
         # Fold
         # [B, d, P, N] --> [B, d, H, W]
-        batch_size, in_dim, patch_size, n_patches = patches.shape
-        patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
+        _, _, patch_size, n_patches = patches.shape
+        patches = patches.reshape(self.batch_size, in_channels * patch_size, n_patches)
         x = F.fold(
             patches,
             output_size=(self.img_h, self.img_w),
             kernel_size=(self.ph, self.pw),
             stride=(self.ph, self.pw)
         )
+        return self.conv_1x1_out(x)
 
-        x = self.conv_1x1_out(x)
-        return x
+    def _initialize_weights(self):
+        for m in self.modules():
+            if isinstance(m, nn.Sequential):
+                for m_ in m:
+                    if isinstance(m_, nn.Conv2d):
+                        nn.init.kaiming_normal_(m_.weight, mode="fan_out")
+            elif isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode="fan_out")
 
     def get_score(self):
         assert self.batch_size == 1
@@ -433,7 +806,116 @@ class MobileViTBlockv2(nn.Module):
 
         # 计算归一化，避免除零错误
         y = (y - y_min) / (y_max - y_min + epsilon)
-        y = torch.split(y.squeeze(),1, dim=0) if y.shape[0] > 1 else (y[0])
+        y = torch.split(y.squeeze(), 1, dim=0) if y.shape[0] > 1 else (y[0])
+        return y
+
+
+class MobileViTBlockv5(nn.Module):
+    '''
+    Args:
+        embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
+        depth: 可分离自注意力头的堆叠个数
+        channel: 输入通道
+        hid_dim: LinearTransformer中FeedForward的隐藏层的神经元数
+        patch_size: LinearTransformer一个patch的边长（图像块边长）
+        kernel_size: 局部表征模块卷积核大小
+        attn_drop: LinearTransformer中的上下文分数context_scores的dropout概率
+        ff_dropout: LinearTransformer中FeedForward的dropout概率
+        dropout: LinearTransformer中经过注意力模块后以及前馈神经网络后的dropout概率
+        layer_dropout: 跳过LinearTransformer的概率
+    '''
+
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, div=1, kernel_size=3, attn_drop=0.0,
+                 ff_dropout=0.0, dropout=0.1, layer_dropout=0., axis="H"):
+        super().__init__()
+        self.ph = patch_size
+        self.pw = patch_size
+        # assert self.ph == self.pw
+        assert axis == 'H' or axis == 'W'
+        self.axis = axis
+        self.div = div
+        self.local_rep = nn.Sequential(
+            nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False, groups=channel),
+            nn.BatchNorm2d(channel),
+            nn.SiLU(),
+            nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        )
+        self.conv_1x1_out = nn.Sequential(
+            nn.Conv2d(embed_dim, channel, 1, 1, 0, bias=False),
+            nn.BatchNorm2d(channel)
+        )
+        self.unfolding_conv = nn.Conv2d(embed_dim, embed_dim * (self.pw * self.ph), (self.ph, self.pw),
+                                        (self.ph, self.pw), groups=embed_dim, bias=False)
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, attn_drop=attn_drop, ff_dropout=ff_dropout,
+                                             dropout=dropout, layer_dropout=layer_dropout)
+
+    def forward(self, x):
+        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
+        x = self.local_rep(x)
+        self.batch_size, in_channels, self.img_h, self.img_w = x.shape
+        # Unfold
+        # [B, d, H, W] --> [B, d, P, N]
+        # patches_ = F.unfold(
+        #     x,
+        #     kernel_size=(self.ph, self.pw),
+        #     stride=(self.ph, self.pw)
+        # )
+        # patches_ = patches_.reshape(
+        #     self.batch_size, in_channels, self.ph * self.pw, -1
+        # )
+        # faster implement
+        patches = self.unfolding_conv(x)
+        patches = patches.reshape(
+            self.batch_size, in_channels,
+            self.ph * self.pw, -1
+        )
+
+        # learn global representations on all patches
+        patches = self.transformer(patches)
+
+        # Fold
+        # [B, d, P, N] --> [B, d, H, W]
+        # batch_size, in_dim, patch_size, n_patches = patches.shape
+        # patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
+        # x = F.fold(
+        #     patches,
+        #     output_size=(self.img_h, self.img_w),
+        #     kernel_size=(self.ph, self.pw),
+        #     stride=(self.ph, self.pw)
+        # )
+        patches = patches.reshape(self.batch_size, in_channels * (self.ph * self.pw),
+                                  self.img_h // self.ph,
+                                  self.img_w // self.pw)
+        x = F.pixel_shuffle(patches, upscale_factor=self.ph)
+        # [B * div, d, H // div, N] / [B * div, d, H, N // div] --> [B, d, H, W]
+        if self.div > 1:
+            x = x.reshape(self.batch_size, in_channels, self.img_h, self.img_w)
+
+        return self.conv_1x1_out(x)
+
+    def get_score(self):
+        assert self.batch_size == 1
+
+        context_scores = torch.cat(self.transformer.context_scores, dim=0)
+        # [d, 1, P, N]
+        batch_size, in_dim, patch_size, n_patches = context_scores.shape
+        assert in_dim == 1
+        # [d, 1, P, N] --> [d, P, N]
+        patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
+        # [d, P, N] --> [d, 1, H, W]
+        y = F.fold(
+            patches,
+            output_size=(self.img_h, self.img_w),
+            kernel_size=(self.ph, self.pw),
+            stride=(self.ph, self.pw)
+        )
+        epsilon = 1e-5
+        y_min = y.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
+        y_max = y.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
+
+        # 计算归一化，避免除零错误
+        y = (y - y_min) / (y_max - y_min + epsilon)
+        y = torch.split(y.squeeze(), 1, dim=0) if y.shape[0] > 1 else (y[0])
         return y
 
 
@@ -448,29 +930,30 @@ class MobileViTBlockv3(nn.Module):
         kernel_size: 局部表征模块卷积核大小
         dropout: LinearTransformer中FeedForward的dropout概率
     '''
-    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
+
+    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size=3,
+                 attn_drop=0.0, ff_dropout=0.0, dropout=0.1, layer_dropout=0.):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
-        self.conv_3x3_in = nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False),
-                nn.BatchNorm2d(channel),
-                nn.SiLU()
-            )
-        self.conv_1x1_in = nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        self.local_rep = nn.Sequential(
+            nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False, groups=channel),
+            nn.BatchNorm2d(channel),
+            nn.SiLU(),
+            nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
+        )
         self.conv_1x1_out = nn.Sequential(
             nn.Conv2d(2 * embed_dim, channel, 1, 1, 0, bias=False),
             nn.BatchNorm2d(channel),
             nn.SiLU()
         )
         self.norm_out = nn.BatchNorm2d(channel)
-        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
-
+        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, attn_drop=attn_drop, ff_dropout=ff_dropout,
+                                             dropout=dropout, layer_dropout=layer_dropout)
 
     def forward(self, x):
         # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
-        x_pre = self.conv_3x3_in(x)
-        x_unfold = self.conv_1x1_in(x_pre)
+        x_unfold = self.local_rep(x)
 
         # Unfold
         # [B, C, H, W] --> [B, d, P, N]
@@ -498,8 +981,7 @@ class MobileViTBlockv3(nn.Module):
             stride=(self.ph, self.pw)
         )
         # Fusion block
-        x_out = torch.cat((x_flod, x_unfold), 1)
-        return self.norm_out(self.conv_1x1_out(x_out) + x)
+        return self.norm_out(self.conv_1x1_out(torch.cat((x_flod, x_unfold), 1)) + x)
 
     def get_score(self):
         assert self.batch_size == 1
@@ -523,112 +1005,7 @@ class MobileViTBlockv3(nn.Module):
 
         # 计算归一化，避免除零错误
         y = (y - y_min) / (y_max - y_min + epsilon)
-        y = torch.split(y.squeeze(),1, dim=0)
-        return y
-
-
-class MobileViTBlockv4(nn.Module):
-    '''
-    Args:
-        embed_dim: :math:`[B, d, P, N]` 中的维度 :math:`d`，就是局部表征张量的通道数
-        depth: 可分离自注意力头的堆叠个数
-        channel: 输入通道
-        hid_dim: LinearTransformer中FeedForward第一个卷积后的通道数
-        patch_size: Transformer一个patch的边长
-        kernel_size: 局部表征模块卷积核大小
-        dropout: LinearTransformer中FeedForward的dropout概率
-    '''
-    def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size = 3, dropout = 0., layer_dropout=0.):
-        super().__init__()
-        self.ph = patch_size
-        self.pw = patch_size
-        self.conv_3x3_in = nn.Sequential(
-                nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False),
-                nn.BatchNorm2d(channel),
-                nn.SiLU()
-            )
-        self.conv_1x1_in = nn.Conv2d(channel, embed_dim, 1, 1, 0, bias=False)
-        self.conv_1x1_out = nn.Sequential(
-            nn.Conv2d(2 * embed_dim, channel, 1, 1, 0, bias=False),
-            nn.BatchNorm2d(channel),
-            nn.SiLU()
-        )
-        self.norm_out = nn.BatchNorm2d(channel)
-        self.transformer = LinearTransformer(embed_dim, hid_dim, depth, patch_size, ff_dropout = dropout, layer_dropout=layer_dropout)
-
-
-    def forward(self, x):
-        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
-        x_pre = self.conv_3x3_in(x)
-        x_unfold = self.conv_1x1_in(x_pre)
-
-        # Inner Patch Attention
-        # Unfold
-        # [B, d, H, W] --> [B*N, d, H//PH, W//PW]
-        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
-        x_unfold = x_unfold.view(self.batch_size, in_channels,
-                                 self.img_h // self.ph, self.ph,
-                                 self.img_w // self.pw, self.pw)
-        patches = x_unfold.permute(0, 2, 4, 1, 3, 5).contiguous().view(-1, in_channels, self.ph, self.pw)
-        patches_shape = patches.shape
-        # 每个patch内做像素级注意力
-        # [B*N, d, H/P, W/P] --> [B*N, d, 1, N]
-        patches = F.unfold(
-            patches,
-            kernel_size=1,
-            stride=1
-        )
-        patches = patches.reshape(
-            patches_shape[0], in_channels, 1, -1
-        )
-
-        # learn pixel representations in each patches
-        # [B*N, d, 1, N]
-        patches = self.transformer(patches)
-
-        # [B*N, d, 1, N] --> [B*N, d, H/P, W/P]
-
-        # Cross Patch Attention
-
-
-
-
-        # Fold
-        # [B, d, P, N] --> [B, C, H, W]
-        batch_size, in_dim, patch_size, n_patches = patches.shape
-        patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
-        x_flod = F.fold(
-            patches,
-            output_size=(self.img_h, self.img_w),
-            kernel_size=(self.ph, self.pw),
-            stride=(self.ph, self.pw)
-        )
-
-        return
-
-    def get_score(self):
-        assert self.batch_size == 1
-
-        context_scores = torch.cat(self.transformer.context_scores, dim=0)
-        # [d, 1, P, N]
-        batch_size, in_dim, patch_size, n_patches = context_scores.shape
-        assert in_dim == 1
-        # [d, 1, P, N] --> [d, P, N]
-        patches = context_scores.reshape(batch_size, in_dim * patch_size, n_patches)
-        # [d, P, N] --> [d, 1, H, W]
-        y = F.fold(
-            patches,
-            output_size=(self.img_h, self.img_w),
-            kernel_size=(self.ph, self.pw),
-            stride=(self.ph, self.pw)
-        )
-        epsilon = 1e-5
-        y_min = y.min(dim=2, keepdim=True)[0].min(dim=3, keepdim=True)[0]
-        y_max = y.max(dim=2, keepdim=True)[0].max(dim=3, keepdim=True)[0]
-
-        # 计算归一化，避免除零错误
-        y = (y - y_min) / (y_max - y_min + epsilon)
-        y = torch.split(y.squeeze(),1, dim=0)
+        y = torch.split(y.squeeze(), 1, dim=0)
         return y
 
 
@@ -664,7 +1041,8 @@ class ConvMixer(nn.Module):
         b, c, _, _ = x.size()
         y = self.DConvN(x)
         y = self.avg_pool(y).view(b, c)
-        y = self.fc(y).view(b, c, 1, 1)
+        y_ = self.avg_pool(x).view(b, c)
+        y = self.fc((y + y_) / 2.0).view(b, c, 1, 1)
         y = torch.exp(y)
         return x * y.expand_as(x)
 
@@ -692,7 +1070,7 @@ class SEAM(nn.Module):
                     nn.BatchNorm2d(c2)
                 )),
                 # 逐点卷积进行多通道融合
-                nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
+                nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0),
                 nn.GELU(),
                 nn.BatchNorm2d(c2)
             ) for i in range(n)]
@@ -735,23 +1113,24 @@ class MultiSEAM(nn.Module):
     def __init__(self, c1, depth, kernel_size=3, patch_size=[6, 7, 8], reduction=16):
         super(MultiSEAM, self).__init__()
         c2 = c1
-        def DcovN(c1, c2, depth, kernel_size=3, patch_size=3):
+
+        def DcovN(c1, c2, depth=1, kernel_size=3, patch_size=3):
             return nn.Sequential(
                 # Patch Embedding
                 nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
-                nn.SiLU(),
+                nn.GELU(),
                 nn.BatchNorm2d(c2),
                 *[nn.Sequential(
                     # 深度可分离卷积
                     Residual(nn.Sequential(
                         nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=kernel_size, stride=1, padding=1,
                                   groups=c2),
-                        nn.SiLU(),
+                        nn.GELU(),
                         nn.BatchNorm2d(c2)
                     )),
                     # 逐点卷积
                     nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
-                    nn.SiLU(),
+                    nn.GELU(),
                     nn.BatchNorm2d(c2)
                 ) for i in range(depth)]
             )
@@ -1295,7 +1674,7 @@ class MaxSigmoidAttnBlock(nn.Module):
 
         aw = torch.einsum("bmchw,bnmc->bmhwn", embed, guide)
         aw = aw.max(dim=-1)[0]
-        aw = aw / (self.hc**0.5)
+        aw = aw / (self.hc ** 0.5)
         aw = aw + self.bias[None, :, None, None]
         aw = aw.sigmoid() * self.scale
 
@@ -1357,7 +1736,7 @@ class ImagePoolingAttn(nn.Module):
         """Executes attention mechanism on input tensor x and guide tensor."""
         bs = x[0].shape[0]
         assert len(x) == self.nf
-        num_patches = self.k**2
+        num_patches = self.k ** 2
         x = [pool(proj(x)).view(bs, -1, num_patches) for (x, proj, pool) in zip(x, self.projections, self.im_pools)]
         x = torch.cat(x, dim=-1).transpose(1, 2)
         q = self.query(text)
@@ -1370,7 +1749,7 @@ class ImagePoolingAttn(nn.Module):
         v = v.reshape(bs, -1, self.nh, self.hc)
 
         aw = torch.einsum("bnmc,bkmc->bmnk", q, k)
-        aw = aw / (self.hc**0.5)
+        aw = aw / (self.hc ** 0.5)
         aw = F.softmax(aw, dim=-1)
 
         x = torch.einsum("bmnk,bkmc->bnmc", aw, v)
@@ -1751,7 +2130,7 @@ class Attention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.key_dim = int(self.head_dim * attn_ratio)
-        self.scale = self.key_dim**-0.5
+        self.scale = self.key_dim ** -0.5
         nh_kd = self.key_dim * num_heads
         h = dim + nh_kd * 2
         self.qkv = Conv(dim, h, 1, act=False)
