@@ -132,11 +132,11 @@ class BboxLoss(nn.Module):
         weight_iou = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
 
-        # iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         small_iou = bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True)
 
         # small_iou = bbox_inner_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True, ratio=0.70)
-        iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=1.10)
+        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=0.80)
 
         loss_iou = ((1.0 - iou) * weight_iou).sum() / target_scores_sum
         loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
