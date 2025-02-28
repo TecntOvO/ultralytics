@@ -64,7 +64,8 @@ from .block import (
     MobileViTBlockv3,
     MobileViTBlockv4,
     MobileViTBlockv5,
-    ConvMixer
+    ConvMixer,
+    C2MVIT
 )
 from .conv import (
     CBAM,

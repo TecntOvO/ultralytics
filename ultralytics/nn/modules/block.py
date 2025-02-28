@@ -60,6 +60,7 @@ __all__ = (
     'MobileViTBlockv3',
     'MobileViTBlockv4',
     'MobileViTBlockv5',
+    'C2MVIT'
 )
 
 
@@ -2316,6 +2317,14 @@ class C2PSA(nn.Module):
         b = self.m(b)
         return self.cv2(torch.cat((a, b), 1))
 
+
+class C2MVIT(C2PSA):
+    def __init__(self, c1, c2, depth=1, patch_size=2, e=0.5):
+        """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
+        super().__init__(c1, c2, 0, e)
+        self.cv1 = DWConv(c1, 2 * self.c, 1, 1)
+        self.cv2 = DWConv(2 * self.c, c1, 1, 1)
+        self.m = MobileViTBlockv2(self.c, depth, self.c, 2 * self.c, patch_size)
 
 class C2fPSA(C2f):
     """
