@@ -60,7 +60,9 @@ __all__ = (
     'MobileViTBlockv3',
     'MobileViTBlockv4',
     'MobileViTBlockv5',
-    'C2MVIT'
+    'C2MVIT',
+    'C2f_attention',
+    'C2fA'
 )
 
 
@@ -948,7 +950,7 @@ class MobileViTBlockv3(nn.Module):
     '''
 
     def __init__(self, embed_dim, depth, channel, hid_dim, patch_size, kernel_size=3,
-                 attn_drop=0.0, ff_dropout=0.0, dropout=0.1, layer_dropout=0.):
+                 attn_drop=0.0, ff_dropout=0.0, dropout=0.0, layer_dropout=0.0):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
@@ -968,12 +970,27 @@ class MobileViTBlockv3(nn.Module):
                                              dropout=dropout, layer_dropout=layer_dropout)
 
     def forward(self, x):
-        # 经过nxn卷积和PW卷积获取局部特征，又称局部表征模块
+        x_in = x
+        # Resize if necessary
+        _, _, img_h, img_w = x.shape
+        Resize = False
+        if img_h % self.ph != 0 or img_w % self.pw != 0:
+            # Note: Padding can be done, but then it needs to be handled in attention function.
+            new_img_h = int(math.ceil(img_h / self.ph) * self.ph)
+            new_img_w = int(math.ceil(img_w / self.pw) * self.pw)
+            x = F.interpolate(
+                x,
+                size=(new_img_h, new_img_w),
+                mode="bilinear",
+                align_corners=False
+            )
+            Resize = True
+        # local rep
         x_unfold = self.local_rep(x)
+        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
 
         # Unfold
-        # [B, C, H, W] --> [B, d, P, N]
-        self.batch_size, in_channels, self.img_h, self.img_w = x_unfold.shape
+        # [B, d, H, W] --> [B, d, P, N]
         patches = F.unfold(
             x_unfold,
             kernel_size=(self.ph, self.pw),
@@ -987,17 +1004,25 @@ class MobileViTBlockv3(nn.Module):
         patches = self.transformer(patches)
 
         # Fold
-        # [B, d, P, N] --> [B, C, H, W]
-        batch_size, in_dim, patch_size, n_patches = patches.shape
-        patches = patches.reshape(batch_size, in_dim * patch_size, n_patches)
-        x_flod = F.fold(
+        # [B, d, P, N] --> [B, d, H, W]
+        _, _, patch_size, n_patches = patches.shape
+        patches = patches.reshape(self.batch_size, in_channels * patch_size, n_patches)
+        x_fold = F.fold(
             patches,
             output_size=(self.img_h, self.img_w),
             kernel_size=(self.ph, self.pw),
             stride=(self.ph, self.pw)
         )
         # Fusion block
-        return self.norm_out(self.conv_1x1_out(torch.cat((x_flod, x_unfold), 1)) + x)
+        x_out = self.conv_1x1_out(torch.cat((x_fold, x_unfold), 1))
+        if Resize:
+            x_out = F.interpolate(
+                x_out,
+                size=(img_h, img_w),
+                mode="bilinear",
+                align_corners=False
+            )
+        return self.norm_out(x_out) + x_in
 
     def get_score(self):
         assert self.batch_size == 1
@@ -1503,6 +1528,19 @@ class C2f(nn.Module):
         return self.cv2(torch.cat(y, 1))
 
 
+class C2fA(C2f):
+    def __init__(self, c1, c2, n=1, depth=1, patch_size=2, e=0.5, shortcut=True, g=1):
+        super().__init__(c1, c2, n, shortcut, g, e)
+        self.m = nn.ModuleList(BottleneckMVIT(self.c, self.c, depth, patch_size, shortcut, g, e=1.0) for _ in range(n))
+
+    def get_score(self):
+        context_scores = []
+        for block in self.m:
+            block_scores = block.get_score()
+            context_scores.extend(block_scores)
+        return tuple(context_scores)
+
+
 class C3(nn.Module):
     """CSP Bottleneck with 3 convolutions."""
 
@@ -1603,6 +1641,43 @@ class Bottleneck(nn.Module):
         """Applies the YOLO FPN to input data."""
         return x + self.cv2(self.cv1(x)) if self.add else self.cv2(self.cv1(x))
 
+class BottleneckMVIT(nn.Module):
+
+    def __init__(self, c1, c2, depth, patch_size=2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        assert (k[0] == 1 or k[0] == 3) and (k[1] == 1 or k[1] == 3)
+        if k[0] == 3:
+            # DWConv
+            self.cv1 = nn.Sequential(
+                nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
+                nn.BatchNorm2d(c1),
+                nn.SiLU(),
+                nn.Conv2d(c1, c_, 1, 1, 0, bias=False)
+            )
+        elif k[0] == 1:
+            self.cv1 = Conv(c1, c_, 1, 1)
+        if k[1] == 3:
+            # DWConv
+            self.cv2 = nn.Sequential(
+                nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
+                nn.BatchNorm2d(c_),
+                nn.SiLU(),
+                nn.Conv2d(c_, c2, 1, 1, 0, bias=False)
+            )
+        elif k[1] == 1:
+            self.cv2 = Conv(c_, c2, 1, 1, g=g)
+
+        self.attn = MobileViTBlockv2(c_ // 2, depth, c_, c_, patch_size)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """Applies the YOLO FPN to input data."""
+        return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2(self.attn(self.cv1(x)))
+
+    def get_score(self):
+        return self.attn.get_score()
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -1988,12 +2063,14 @@ class C3k2(C2f):
             C3k(self.c, self.c, 2, shortcut, g) if c3k else Bottleneck(self.c, self.c, shortcut, g) for _ in range(n)
         )
 
+
 class C2f_attention(C2f):
-    def __init__(self, c1, c2, depth=1, e=0.5, g=1, shortcut=True, patch_size=2):
+    def __init__(self, c1, c2, depth=1, patch_size=2, e=0.5, g=1, shortcut=True):
         """Initializes the C3k2 module, a faster CSP Bottleneck with 2 convolutions and optional C3k blocks."""
-        super().__init__(c1, c2, 1, shortcut, g, e)
-        self.cv2 = Conv(2 * self.c, c2, 1)
-        self.m = MobileViTBlockv2(self.c // 2, depth, self.c, self.c, patch_size)
+        super().__init__(c1, c2, 0, shortcut, g, e)
+        self.cv1 = DWConv(c1, 2 * self.c, 1, 1)
+        self.cv2 = DWConv(2 * self.c, c2, 1)
+        self.m = MobileViTBlockv2(self.c, depth, self.c, 2 * self.c, patch_size)
 
     def forward(self, x):
         """Forward pass through C2f layer."""
@@ -2005,8 +2082,12 @@ class C2f_attention(C2f):
         """Forward pass using split() instead of chunk()."""
         y = self.cv1(x).split((self.c, self.c), 1)
         y = [y[0], y[1]]
-        y.extend(self.m(y[-1]))
+        y[-1] = self.m(y[-1])
         return self.cv2(torch.cat(y, 1))
+
+    def get_score(self):
+        return self.m.get_score()
+
 
 class C3k(C3):
     """C3k is a CSP bottleneck module with customizable kernel sizes for feature extraction in neural networks."""
@@ -2319,12 +2400,17 @@ class C2PSA(nn.Module):
 
 
 class C2MVIT(C2PSA):
+
     def __init__(self, c1, c2, depth=1, patch_size=2, e=0.5):
         """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
         super().__init__(c1, c2, 0, e)
         self.cv1 = DWConv(c1, 2 * self.c, 1, 1)
         self.cv2 = DWConv(2 * self.c, c1, 1, 1)
         self.m = MobileViTBlockv2(self.c, depth, self.c, 2 * self.c, patch_size)
+
+    def get_score(self):
+        return self.m.get_score()
+
 
 class C2fPSA(C2f):
     """

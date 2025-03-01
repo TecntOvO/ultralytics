@@ -65,7 +65,9 @@ from .block import (
     MobileViTBlockv4,
     MobileViTBlockv5,
     ConvMixer,
-    C2MVIT
+    C2MVIT,
+    C2f_attention,
+    C2fA
 )
 from .conv import (
     CBAM,
@@ -81,7 +83,9 @@ from .conv import (
     LightConv,
     RepConv,
     SpatialAttention,
-    WeightedConcat
+    WeightedConcat,
+    DualConv,
+
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
 from .transformer import (

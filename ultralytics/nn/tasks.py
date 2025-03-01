@@ -72,7 +72,10 @@ from ultralytics.nn.modules import (
     MobileViTBlockv5,
     ConvMixer,
     WeightedConcat,
-    C2MVIT
+    C2MVIT,
+    C2f_attention,
+    DualConv,
+    C2fA
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -160,13 +163,14 @@ class BaseModel(nn.Module):
             ops.Profile(device=x.device),
             ops.Profile(device=x.device)
         )
+        score_module = {'ultralytics.nn.modules.block.C2MVIT', 'ultralytics.nn.modules.block.MobileViTBlockv2',
+                        'ultralytics.nn.modules.block.C2f_attention', 'ultralytics.nn.modules.block.C2fA'}
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            if (m.type == 'ultralytics.nn.modules.block.MobileViTBlockv2' and
-                    score_visualize and x.shape[0] == 1):
+            if m.type in score_module and score_visualize and x.shape[0] == 1:
                 with profilers[0]:
                     x = m(x)
                 with profilers[1]:
@@ -1030,6 +1034,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             MultiSEAM,
             C2MVIT,
+            C2f_attention,
+            DualConv,
+            C2fA
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1056,6 +1063,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fPSA,
                 C2fCIB,
                 C2PSA,
+                C2fA
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
