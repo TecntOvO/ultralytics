@@ -22,8 +22,11 @@ Usage - formats:
 """
 
 import json
+import os.path
 import time
+from copy import deepcopy
 from pathlib import Path
+from pycocotools.coco import COCO
 
 import numpy as np
 import torch
@@ -35,7 +38,7 @@ from ultralytics.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
-
+from ultralytics.utils.coco_eval import coco_eval
 
 class BaseValidator:
     """
@@ -222,6 +225,19 @@ class BaseValidator:
                 stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
+            if self.args.export_coco_result and self.jdict:
+                if os.path.exists(self.args.val_coco):
+                    LOGGER.info(f"Reading Val COCO data from {self.args.val_coco}")
+                    anno = COCO(self.args.val_coco)
+                    jdict = deepcopy(self.jdict)
+                    for i, ann in enumerate(jdict):
+                        jdict[i]['image_id'] = str(ann['image_id'])
+                    pred_result = anno.loadRes(jdict)
+                    eval_result = coco_eval(anno, pred_result, 'bbox')
+                    eval_result.evaluate()
+                    eval_result.accumulate()
+                    eval_result.summarize(str(self.save_dir / "coco_analysis.csv"))
+                    LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir / 'coco_analysis.csv')}")
             return stats
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):

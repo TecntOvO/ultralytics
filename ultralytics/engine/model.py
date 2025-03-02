@@ -798,6 +798,9 @@ class Model(nn.Module):
         if args["save_score"]:
             LOGGER.warning("save_score is forbidden when training,setting 'save_score=False'")
             args["save_score"] = False
+        if args["export_coco_result"] and args["val_coc"] is None:
+            LOGGER.warning("val_coc is required when export_coco_result is True,setting 'export_coco_result=False'")
+            args["export_coco_result"] = False
 
         self.trainer = (trainer or self._smart_load("trainer"))(overrides=args, _callbacks=self.callbacks)
         if not args.get("resume"):  # manually set model only if not resuming

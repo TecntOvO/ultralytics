@@ -1669,7 +1669,7 @@ class BottleneckMVIT(nn.Module):
         elif k[1] == 1:
             self.cv2 = Conv(c_, c2, 1, 1, g=g)
 
-        self.attn = MobileViTBlockv2(c_ // 2, depth, c_, c_, patch_size)
+        self.attn = MobileViTBlockv2(c1, depth, c1, 2 * c1, patch_size)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):

@@ -7,7 +7,7 @@ if __name__ == '__main__':
     # model = YOLO(r"yolo11s.yaml")
     # model = YOLO(r"yolov11-ViTv2-NewNeck-test4-xxs.yaml").load(
     #     r"D:\Yolov11\ultralytics\runs\detect\compare in newNeck\new new data\mv2-cov24-xxs-0.001-ffndrop0.0 allmv2\weights\best.pt")
-    model = YOLO(r"yoloA11-5.yaml")
+    model = YOLO(r"yoloA11-6.yaml")
     model.load(r"yolo11n.pt")
     model.train(
         # data="straberry_enh.yaml",  # path to dataset YAML
