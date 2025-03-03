@@ -62,7 +62,8 @@ __all__ = (
     'MobileViTBlockv5',
     'C2MVIT',
     'C2f_attention',
-    'C2fA'
+    'C2fA',
+    'SPD'
 )
 
 
@@ -1204,6 +1205,14 @@ class MultiSEAM(nn.Module):
         return x * y.expand_as(x)
 
 
+class SPD(nn.Module):
+    # Changing the dimension of the Tensor
+    def __init__(self, dimension=1):
+        super().__init__()
+        self.d = dimension
+
+    def forward(self, x):
+         return torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1)
 #####################################################################
 
 

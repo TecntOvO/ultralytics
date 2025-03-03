@@ -67,7 +67,8 @@ from .block import (
     ConvMixer,
     C2MVIT,
     C2f_attention,
-    C2fA
+    C2fA,
+    SPD
 )
 from .conv import (
     CBAM,
