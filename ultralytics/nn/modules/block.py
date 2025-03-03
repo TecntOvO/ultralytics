@@ -1124,8 +1124,8 @@ class SEAM(nn.Module):
             nn.Sigmoid()
         )
 
-        self._initialize_weights()
-        self.initialize_layer(self.fc)
+        # self._initialize_weights()
+        # self.initialize_layer(self.fc)
 
     def forward(self, x):
         b, c, _, _ = x.size()
@@ -1531,7 +1531,7 @@ class C2f(nn.Module):
 class C2fA(C2f):
     def __init__(self, c1, c2, n=1, depth=1, patch_size=2, e=0.5, shortcut=True, g=1):
         super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(BottleneckMVIT(self.c, self.c, depth, patch_size, shortcut, g, e=1.0) for _ in range(n))
+        self.m = nn.ModuleList(BottleneckMVIT2(self.c, self.c, depth, patch_size, shortcut, g, e=1.0) for _ in range(n))
 
     def get_score(self):
         context_scores = []
@@ -1647,7 +1647,8 @@ class BottleneckMVIT(nn.Module):
         """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        assert (k[0] == 1 or k[0] == 3) and (k[1] == 1 or k[1] == 3)
+        # self.cv1 = Conv(c1, c_, 1, 1)
+        # self.cv2 = Conv(c_, c2, 1, 1, g=g)
         if k[0] == 3:
             # DWConv
             self.cv1 = nn.Sequential(
@@ -1656,8 +1657,6 @@ class BottleneckMVIT(nn.Module):
                 nn.SiLU(),
                 nn.Conv2d(c1, c_, 1, 1, 0, bias=False)
             )
-        elif k[0] == 1:
-            self.cv1 = Conv(c1, c_, 1, 1)
         if k[1] == 3:
             # DWConv
             self.cv2 = nn.Sequential(
@@ -1666,18 +1665,57 @@ class BottleneckMVIT(nn.Module):
                 nn.SiLU(),
                 nn.Conv2d(c_, c2, 1, 1, 0, bias=False)
             )
-        elif k[1] == 1:
-            self.cv2 = Conv(c_, c2, 1, 1, g=g)
 
-        self.attn = MobileViTBlockv2(c1, depth, c1, 2 * c1, patch_size)
+
+        self.attn = MobileViTBlockv2(c_, depth, c_, 2 * c_, patch_size)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
         """Applies the YOLO FPN to input data."""
-        return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2(self.attn(self.cv1(x)))
+        return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2self.attn((self.cv1(x)))
 
     def get_score(self):
         return self.attn.get_score()
+
+
+class BottleneckMVIT2(nn.Module):
+
+    def __init__(self, c1, c2, depth, patch_size=2, shortcut=True, g=1, k=(3, 3), e=0.5):
+        """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        # self.cv1 = Conv(c1, c_, 1, 1)
+        # self.cv2 = Conv(c_, c2, 1, 1, g=g)
+        if k[0] == 3:
+            # DWConv
+            self.cv1 = nn.Sequential(
+                nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
+                nn.BatchNorm2d(c1),
+                nn.SiLU(),
+                nn.Conv2d(c1, c_, 1, 1, 0, bias=False)
+            )
+        if k[1] == 3:
+            # DWConv
+            self.cv2 = nn.Sequential(
+                nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
+                nn.BatchNorm2d(c_),
+                nn.SiLU(),
+                nn.Conv2d(c_, c2, 1, 1, 0, bias=False)
+            )
+
+        self.channel_attn = ConvMixer(c_, c_, 1, 3, 3)
+        self.attn = MobileViTBlockv2(c_, depth, c_, 2 * c_, patch_size)
+        self.add = shortcut and c1 == c2
+
+    def forward(self, x):
+        """Applies the YOLO FPN to input data."""
+        return x + self.cv2(self.attn(self.channel_attn(self.cv1(x)))) \
+            if self.add \
+            else self.cv2(self.attn(self.channel_attn(self.cv1(x))))
+
+    def get_score(self):
+        return self.attn.get_score()
+
 
 class BottleneckCSP(nn.Module):
     """CSP Bottleneck https://github.com/WongKinYiu/CrossStagePartialNetworks."""
@@ -2054,6 +2092,7 @@ class C3f(nn.Module):
 
 
 class C3k2(C2f):
+
     """Faster Implementation of CSP Bottleneck with 2 convolutions."""
 
     def __init__(self, c1, c2, n=1, c3k=False, e=0.5, g=1, shortcut=True):

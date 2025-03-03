@@ -19,9 +19,10 @@ if __name__ == '__main__':
         rect=True,
         batch=32,
         resume=False,
-        cos_lr=True
+        cos_lr=True,
+        export_coco_result=True,
+        val_coco=r"D:\Yolov11\datasets\split_whole_7-3\instances_val2017.json"
     )
-
 
     # print('####################################################################')
     # model = YOLO(r"yoloA11-2.yaml")
