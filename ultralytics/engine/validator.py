@@ -37,6 +37,8 @@ from ultralytics.utils import LOGGER, TQDM, callbacks, colorstr, emojis
 from ultralytics.utils.checks import check_imgsz
 from ultralytics.utils.ops import Profile
 from ultralytics.utils.torch_utils import de_parallel, select_device, smart_inference_mode
+from pycocotools.coco import COCO
+from ultralytics.utils.coco_eval import coco_eval
 
 
 class BaseValidator:
@@ -96,6 +98,7 @@ class BaseValidator:
         self.jdict = None
         self.speed = {"preprocess": 0.0, "inference": 0.0, "loss": 0.0, "postprocess": 0.0}
 
+
         self.save_dir = save_dir or get_save_dir(self.args)
         (self.save_dir / "labels" if self.args.save_txt else self.save_dir).mkdir(parents=True, exist_ok=True)
         if self.args.conf is None:
@@ -106,8 +109,9 @@ class BaseValidator:
         self.callbacks = _callbacks or callbacks.get_default_callbacks()
 
     @smart_inference_mode()
-    def __call__(self, trainer=None, model=None):
+    def __call__(self, trainer=None, model=None, coco_path=None):
         """Executes validation process, running inference on dataloader and computing performance metrics."""
+        self.coco_path = coco_path
         self.training = trainer is not None
         augment = self.args.augment and (not self.training)
         if self.training:
@@ -219,6 +223,22 @@ class BaseValidator:
                 stats = self.eval_json(stats)  # update stats
             if self.args.plots or self.args.save_json:
                 LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir)}")
+            if self.coco_path is not None and self.jdict:
+                import os, copy
+                if os.path.exists(self.coco_path):
+                    LOGGER.info(f"Reading Val/Test COCO data from {colorstr('bold',self.coco_path)}")
+                    anno = COCO(self.coco_path)
+                    jdict = copy.deepcopy(self.jdict)
+                    for i, ann in enumerate(jdict):
+                        jdict[i]['image_id'] = str(ann['image_id'])
+                    pred_result = anno.loadRes(jdict)
+                    eval_result = coco_eval(anno, pred_result, 'bbox')
+                    eval_result.evaluate()
+                    eval_result.accumulate()
+                    eval_result.summarize(str(self.save_dir / "coco_analysis.csv"))
+                    LOGGER.info(f"Results saved to {colorstr('bold', self.save_dir / 'coco_analysis.csv')}")
+                else:
+                    LOGGER.warning(f"COCO data Path {colorstr('bold',self.coco_path)} Do Not Exist!!!")
             return stats
 
     def match_predictions(self, pred_classes, true_classes, iou, use_scipy=False):

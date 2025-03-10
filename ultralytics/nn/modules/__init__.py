@@ -58,6 +58,10 @@ from .block import (
     ResNetLayer,
     SCDown,
     TorchVision,
+    MultiSEAM,
+    SEAM,
+    MobileViTBlockv2,
+    C2fA
 )
 from .conv import (
     CBAM,

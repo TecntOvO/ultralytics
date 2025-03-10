@@ -142,7 +142,8 @@ class BasePredictor:
             if self.args.visualize and (not self.source_type.tensor)
             else False
         )
-        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed, *args, **kwargs)
+        return self.model(im, augment=self.args.augment, visualize=visualize, embed=self.args.embed,
+                          score_visualize=self.args.save_score, *args, **kwargs)
 
     def pre_transform(self, im):
         """
@@ -258,7 +259,10 @@ class BasePredictor:
 
                 # Inference
                 with profilers[1]:
-                    preds = self.inference(im, *args, **kwargs)
+                    if self.args.save_score:
+                        preds, score = self.inference(im, *args, **kwargs)
+                    else:
+                        preds = self.inference(im, *args, **kwargs)
                     if self.args.embed:
                         yield from [preds] if isinstance(preds, torch.Tensor) else preds  # yield embedding tensors
                         continue
@@ -278,7 +282,10 @@ class BasePredictor:
                         "postprocess": profilers[2].dt * 1e3 / n,
                     }
                     if self.args.verbose or self.args.save or self.args.save_txt or self.args.show:
-                        s[i] += self.write_results(i, Path(paths[i]), im, s)
+                        if self.args.save_score:
+                            s[i] += self.write_results(i, Path(paths[i]), im, s, score)
+                        else:
+                            s[i] += self.write_results(i, Path(paths[i]), im, s)
 
                 # Print batch results
                 if self.args.verbose:
@@ -322,8 +329,13 @@ class BasePredictor:
         self.args.half = self.model.fp16  # update half
         self.model.eval()
 
-    def write_results(self, i, p, im, s):
+    def write_results(self, i, p, im, s, score=None):
         """Write inference results to a file or directory."""
+        import seaborn
+        import matplotlib.pyplot as plt
+        import matplotlib
+        matplotlib.use('Agg')
+
         string = ""  # print string
         if len(im.shape) == 3:
             im = im[None]  # expand for batch dim
@@ -335,6 +347,8 @@ class BasePredictor:
             frame = int(match[1]) if match else None  # 0 if frame undetermined
 
         self.txt_path = self.save_dir / "labels" / (p.stem + ("" if self.dataset.mode == "image" else f"_{frame}"))
+        if self.args.save_score:
+            (self.save_dir / p.name[:-4]).mkdir(parents=True, exist_ok=True)
         string += "{:g}x{:g} ".format(*im.shape[2:])
         result = self.results[i]
         result.save_dir = self.save_dir.__str__()  # used in other locations
@@ -350,6 +364,16 @@ class BasePredictor:
                 im_gpu=None if self.args.retina_masks else im[i],
             )
 
+        if self.args.save_score and score:
+            for block_idx, score_tuple in enumerate(score):
+                for score_idx, score_tensor in enumerate(score_tuple):
+                    score_feature = score_tensor.cpu().numpy().squeeze()
+                    seaborn.heatmap(score_feature, xticklabels=False, yticklabels=False, cbar=False, cmap='seismic')
+                    # plt.imshow(score_feature, cmap='hot', interpolation='nearest')
+                    plt.tight_layout(pad=0.0)
+                    plt.savefig(self.save_dir / p.name[:-4]/ f'MVIT_Block{block_idx + 1}_Score{score_idx + 1}.png')
+                    plt.close()
+
         # Save results
         if self.args.save_txt:
             result.save_txt(f"{self.txt_path}.txt", save_conf=self.args.save_conf)
@@ -358,7 +382,10 @@ class BasePredictor:
         if self.args.show:
             self.show(str(p))
         if self.args.save:
-            self.save_predicted_images(str(self.save_dir / p.name), frame)
+            if self.args.save_score:
+                self.save_predicted_images(str(self.save_dir / p.name[:-4] / p.name), frame)
+            else:
+                self.save_predicted_images(str(self.save_dir / p.name), frame)
 
         return string
 

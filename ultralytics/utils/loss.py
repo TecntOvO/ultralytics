@@ -9,7 +9,7 @@ from ultralytics.utils.ops import crop_mask, xywh2xyxy, xyxy2xywh
 from ultralytics.utils.tal import RotatedTaskAlignedAssigner, TaskAlignedAssigner, dist2bbox, dist2rbox, make_anchors
 from ultralytics.utils.torch_utils import autocast
 
-from .metrics import bbox_iou, probiou
+from .metrics import bbox_iou, probiou, bbox_inner_iou, RepGT_loss, RepBox_loss
 from .tal import bbox2dist
 
 
@@ -96,11 +96,18 @@ class BboxLoss(nn.Module):
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
 
-    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask):
+    def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum,
+                fg_mask, repgt_weight, repbox_weight):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+
+        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=0.9)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
+        if repgt_weight > 0:
+            loss_iou += RepGT_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], False) * repgt_weight
+        # if repbox_weight > 0:
+        #     loss_iou += RepBox_loss(pred_bboxes[fg_mask], False) * repbox_weight
 
         # DFL loss
         if self.dfl_loss:
@@ -250,7 +257,8 @@ class v8DetectionLoss:
         if fg_mask.sum():
             target_bboxes /= stride_tensor
             loss[0], loss[2] = self.bbox_loss(
-                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask
+                pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, target_scores_sum, fg_mask,
+                self.hyp.repgt_weight, self.hyp.repbox_weight
             )
 
         loss[0] *= self.hyp.box  # box gain

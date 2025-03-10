@@ -40,18 +40,18 @@ class DetectionTrainer(BaseTrainer):
             batch (int, optional): Size of batches, this is for `rect`. Defaults to None.
         """
         gs = max(int(de_parallel(self.model).stride.max() if self.model else 0), 32)
-        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode == "val", stride=gs)
+        return build_yolo_dataset(self.args, img_path, batch, self.data, mode=mode, rect=mode in {"val", "test", "ano"}, stride=gs)
 
     def get_dataloader(self, dataset_path, batch_size=16, rank=0, mode="train"):
         """Construct and return dataloader."""
-        assert mode in {"train", "val"}, f"Mode must be 'train' or 'val', not {mode}."
+        assert mode in {"train", "val", "test", "ano"}, f"Mode must be 'train','val' or 'test', not {mode}."
         with torch_distributed_zero_first(rank):  # init dataset *.cache only once if DDP
             dataset = self.build_dataset(dataset_path, mode, batch_size)
         shuffle = mode == "train"
         if getattr(dataset, "rect", False) and shuffle:
             LOGGER.warning("WARNING ⚠️ 'rect=True' is incompatible with DataLoader shuffle, setting shuffle=False")
             shuffle = False
-        workers = self.args.workers if mode == "train" else self.args.workers * 2
+        workers = self.args.workers if mode == "train" else (self.args.workers * 2 if mode == "val" else 1)
         return build_dataloader(dataset, batch_size, workers, shuffle, rank)  # return dataloader
 
     def preprocess_batch(self, batch):
@@ -95,6 +95,16 @@ class DetectionTrainer(BaseTrainer):
         self.loss_names = "box_loss", "cls_loss", "dfl_loss"
         return yolo.detect.DetectionValidator(
             self.test_loader, save_dir=self.save_dir, args=copy(self.args), _callbacks=self.callbacks
+        )
+
+    def get_testifidator(self):
+        return yolo.detect.DetectionValidator(
+            self.temp_loader, save_dir=self.testdir, args=copy(self.args), _callbacks=self.callbacks
+        )
+
+    def get_ano_testifidator(self):
+        return yolo.detect.DetectionValidator(
+            self.temp_loader, save_dir=self.testdir_ano, args=copy(self.args), _callbacks=self.callbacks
         )
 
     def label_loss_items(self, loss_items=None, prefix="train"):

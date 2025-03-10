@@ -111,6 +111,8 @@ class BaseTrainer:
         self.save_dir = get_save_dir(self.args)
         self.args.name = self.save_dir.name  # update name for loggers
         self.wdir = self.save_dir / "weights"  # weights dir
+        self.testdir = self.save_dir / "test_result"
+        self.testdir_ano = self.save_dir / "test_result_ano"
         if RANK in {-1, 0}:
             self.wdir.mkdir(parents=True, exist_ok=True)  # make dir
             self.args.save_dir = str(self.save_dir)
@@ -131,7 +133,12 @@ class BaseTrainer:
         # Model and Dataset
         self.model = check_model_file_from_stem(self.args.model)  # add suffix, i.e. yolo11n -> yolo11n.pt
         with torch_distributed_zero_first(LOCAL_RANK):  # avoid auto-downloading dataset multiple times
-            self.trainset, self.testset = self.get_dataset()
+            self.trainset, self.testset, self.tempset, self.anoset = self.get_dataset()
+        if RANK in {-1, 0}:
+            if self.tempset:
+                self.testdir.mkdir(parents=True, exist_ok=True)
+            if self.anoset:
+                self.testdir_ano.mkdir(parents=True, exist_ok=True)
         self.ema = None
 
         # Optimization utils init
@@ -291,6 +298,18 @@ class BaseTrainer:
                 self.testset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1, mode="val"
             )
             self.validator = self.get_validator()
+            if self.tempset:
+                self.temp_loader = self.get_dataloader(
+                    self.tempset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1,
+                    mode="test"
+                )
+                self.testifidator = self.get_testifidator()
+            if self.anoset:
+                self.ano_loader = self.get_dataloader(
+                    self.anoset, batch_size=batch_size if self.args.task == "obb" else batch_size * 2, rank=-1,
+                    mode="ano"
+                )
+                self.ano_testifidator = self.get_ano_testifidator()
             metric_keys = self.validator.metrics.keys + self.label_loss_items(prefix="val")
             self.metrics = dict(zip(metric_keys, [0] * len(metric_keys)))
             self.ema = ModelEMA(self.model)
@@ -468,9 +487,13 @@ class BaseTrainer:
             seconds = time.time() - self.train_time_start
             LOGGER.info(f"\n{epoch - self.start_epoch + 1} epochs completed in {seconds / 3600:.3f} hours.")
             self.final_eval()
+            # Do Test with best.pt
+            self.final_test()
             if self.args.plots:
                 self.plot_metrics()
             self.run_callbacks("on_train_end")
+
+
         self._clear_memory()
         unset_deterministic()
         self.run_callbacks("teardown")
@@ -571,7 +594,7 @@ class BaseTrainer:
             LOGGER.info("Overriding class names with single class.")
             self.data["names"] = {0: "item"}
             self.data["nc"] = 1
-        return data["train"], data.get("val") or data.get("test")
+        return data["train"], data.get("val"), data.get("test"), data.get("test_ano")
 
     def setup_model(self):
         """Load/create/download model for any task."""
@@ -690,9 +713,21 @@ class BaseTrainer:
                     strip_optimizer(f, updates={k: ckpt[k]} if k in ckpt else None)
                     LOGGER.info(f"\nValidating {f}...")
                     self.validator.args.plots = self.args.plots
-                    self.metrics = self.validator(model=f)
+                    self.metrics = self.validator(model=f, coco_path=self.args.val_coco_path)
                     self.metrics.pop("fitness", None)
-                    self.run_callbacks("on_fit_epoch_end")
+
+    def final_test(self):
+        if self.best.exists():
+            LOGGER.info(f"\nTrying to Test {self.best}...")
+            if self.tempset:
+                self.testifidator.args.plots = self.args.plots
+                self.testifidator(model=self.best, coco_path=self.args.test_coco_path)
+            if self.anoset:
+                self.ano_testifidator.args.plots = self.args.plots
+                self.ano_testifidator(model=self.best, coco_path=self.args.ano_coco_path)
+            self.run_callbacks("on_fit_epoch_end")
+
+
 
     def check_resume(self, overrides):
         """Check if resume checkpoint exists and update arguments accordingly."""

@@ -17,6 +17,80 @@ OKS_SIGMA = (
 )
 
 
+def RepGT_iog(box1, box2, xywh=True):
+    if xywh:  # transform from xywh to xyxy
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
+        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
+        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
+    else:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
+            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+    g_area = torch.abs(b2_x2 - b2_x1) * torch.abs(b2_y2 - b2_y1)
+    iog = inter / g_area
+    return iog
+
+
+def RepGT_loss(box1, box2, xywh=False, sigma=0.5):
+    # box1 -> pred,box2 -> target
+    assert 0.0 <= sigma <= 1.0
+    sigma = torch.tensor(sigma).to(box1.device)
+
+    # 计算全量IOU矩阵 (M, M)，每列为预测，每行为真实
+    all_iou = bbox_iou(box1.unsqueeze(dim=0), box2.unsqueeze(dim=1), xywh).squeeze(dim=-1)  # 实现需支持批量计算
+
+    # 获取有效样本掩膜
+    mask = all_iou.diagonal() > 0.5
+
+    # 无有效样本时提前返回
+    if not mask.any():
+        return torch.tensor(0.0, device=box1.device)
+
+    # 将对角线置0
+    all_iou_zeros = all_iou - all_iou.diagonal().diag()
+
+    # 找到每列最大的元素下标（， M)（对应每个预测框除了自己要回归的gt框外，其它框中与它iou最大的）
+    max_indices = torch.argmax(all_iou_zeros, dim=0)
+
+    # 找到对应的真实框(M,4)
+    match_target_box = box2[max_indices]
+
+    # 计算考虑样本的IOG
+    IOG = RepGT_iog(box1[mask, :], match_target_box[mask, :], xywh).squeeze(-1)
+
+    # 应用smooth_ln
+    IOG_smooth = torch.where(
+        IOG > sigma,
+        (IOG - sigma) / (1 - sigma) - torch.log(1 - sigma),
+        -torch.log(1 - IOG)
+    )
+
+    return IOG_smooth.mean()
+
+
+def RepBox_loss(box, xywh=False, sigma=0.5):
+    assert 0.0 <= sigma <= 1.0
+    sigma = torch.tensor(sigma).to(box.device)
+
+    all_iou = bbox_iou(box.unsqueeze(dim=0), box.unsqueeze(dim=1), xywh).squeeze(-1)
+
+    upper_triangle_part = torch.triu(all_iou, diagonal=1)
+    nonzero_count = (upper_triangle_part != 0).sum()
+
+    if nonzero_count == 0:
+        return torch.tensor(0.0, device=box.device)
+
+    bbox_loss = torch.where(
+        upper_triangle_part > sigma,
+        (upper_triangle_part - sigma) / (1 - sigma) - torch.log(1 - sigma),
+        -torch.log(1 - upper_triangle_part)
+    )
+
+    return bbox_loss.sum() / nonzero_count
+
+
 def bbox_ioa(box1, box2, iou=False, eps=1e-7):
     """
     Calculate the intersection over box2 area given box1 and box2. Boxes are in x1y1x2y2 format.
@@ -69,6 +143,127 @@ def box_iou(box1, box2, eps=1e-7):
 
     # IoU = inter / (area1 + area2 - inter)
     return inter / ((a2 - a1).prod(2) + (b2 - b1).prod(2) - inter + eps)
+
+
+def get_inner_iou(box1, box2, xywh=True, eps=1e-7, ratio=0.7):
+    from ultralytics.utils import ops
+    if not xywh:
+        box1, box2 = ops.xyxy2xywh(box1), ops.xyxy2xywh(box2)
+    (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+    b1_x1, b1_x2, b1_y1, b1_y2 = x1 - (w1 * ratio) / 2, x1 + (w1 * ratio) / 2, y1 - (h1 * ratio) / 2, y1 + (
+                h1 * ratio) / 2
+    b2_x1, b2_x2, b2_y1, b2_y2 = x2 - (w2 * ratio) / 2, x2 + (w2 * ratio) / 2, y2 - (h2 * ratio) / 2, y2 + (
+                h2 * ratio) / 2
+
+    # Intersection area
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
+            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+
+    # Union Area
+    union = w1 * h1 * (ratio ** 2) + w2 * h2 * (ratio ** 2) - inter + eps
+    return inter / union
+
+
+def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EIoU=False, SIoU=False,
+                   use_inner_iou=False, eps=1e-7, ratio=0.7):
+    """
+    Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
+    Args:
+        box1 (torch.Tensor): A tensor representing a single bounding box with shape (1, 4).
+        box2 (torch.Tensor): A tensor representing n bounding boxes with shape (n, 4).
+        xywh (bool, optional): If True, input boxes are in (x, y, w, h) format. If False, input boxes are in
+                               (x1, y1, x2, y2) format. Defaults to True.
+        GIoU (bool, optional): If True, calculate Generalized IoU. Defaults to False.
+        DIoU (bool, optional): If True, calculate Distance IoU. Defaults to False.
+        CIoU (bool, optional): If True, calculate Complete IoU. Defaults to False.
+        EIoU (bool, optional): If True, calculate Efficient IoU. Defaults to False.
+        SIoU (bool, optional): If True, calculate Scylla IoU. Defaults to False.
+        eps (float, optional): A small value to avoid division by zero. Defaults to 1e-7.
+    Returns:
+        (torch.Tensor): IoU, GIoU, DIoU, or CIoU values depending on the specified flags.
+    """
+
+    # Get the coordinates of bounding boxes
+    if xywh:  # transform from xywh to xyxy
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
+        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
+        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
+    else:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+
+
+
+    # Intersection area
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * \
+            (b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+
+    # Union Area
+    union = w1 * h1 + w2 * h2 - inter + eps
+
+    # IoU
+    iou = inter / union
+    if CIoU or DIoU or GIoU or EIoU or SIoU:
+        cw = b1_x2.maximum(b2_x2) - b1_x1.minimum(b2_x1)  # convex (smallest enclosing box) width
+        ch = b1_y2.maximum(b2_y2) - b1_y1.minimum(b2_y1)  # convex height
+        if CIoU or DIoU or EIoU or SIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            c2 = cw.pow(2) + ch.pow(2) + eps  # convex diagonal squared
+            rho2 = (
+                (b2_x1 + b2_x2 - b1_x1 - b1_x2).pow(2) + (b2_y1 + b2_y2 - b1_y1 - b1_y2).pow(2)
+            ) / 4  # center dist**2
+            if CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
+                with torch.no_grad():
+                    alpha = v / (v - iou + (1 + eps))
+                if use_inner_iou:
+                    iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+                return iou - (rho2 / c2 + v * alpha)  # inner-CIoU
+            elif EIoU:
+                rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
+                rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
+                cw2 = cw ** 2 + eps
+                ch2 = ch ** 2 + eps
+                if use_inner_iou:
+                    iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+                return iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)     # inner-EIoU
+            elif SIoU:
+                # SIoU Loss https://arxiv.org/pdf/2205.12740.pdf
+                # angle loss
+                s_cw = (b2_x1 + b2_x2 - b1_x1 - b1_x2) * 0.5 + eps
+                s_ch = (b2_y1 + b2_y2 - b1_y1 - b1_y2) * 0.5 + eps
+                sigma = torch.pow(s_cw ** 2 + s_ch ** 2, 0.5)
+                sin_alpha_1 = torch.abs(s_cw) / sigma
+                sin_alpha_2 = torch.abs(s_ch) / sigma
+                threshold = pow(2, 0.5) / 2
+                sin_alpha = torch.where(sin_alpha_1 > threshold, sin_alpha_2, sin_alpha_1)
+                angle_cost = torch.cos(torch.arcsin(sin_alpha) * 2 - math.pi / 2)
+
+                # distance loss
+                rho_x = (s_cw / cw) ** 2
+                rho_y = (s_ch / ch) ** 2
+                gamma = angle_cost - 2
+                distance_cost = 2 - torch.exp(gamma * rho_x) - torch.exp(gamma * rho_y)
+
+                #shape loss
+                omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
+                omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
+                shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
+                if use_inner_iou:
+                    iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+                return iou - 0.5 * (distance_cost + shape_cost) + eps  # inner-SIoU
+            if use_inner_iou:
+                iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+            return iou - rho2 / c2  # inner-DIoU
+        c_area = cw * ch + eps  # convex area
+        if use_inner_iou:
+            iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+        return iou - (c_area - union) / c_area  # inner-GIoU https://arxiv.org/pdf/1902.09630.pdf
+    if use_inner_iou:
+        iou = get_inner_iou(box1, box2, xywh=xywh, ratio=ratio)
+    return iou  # inner-IoU
 
 
 def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7):

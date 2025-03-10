@@ -63,8 +63,13 @@ from ultralytics.nn.modules import (
     TorchVision,
     WorldDetect,
     v10Detect,
+    CBAM,
+    MultiSEAM,
+    SEAM,
+    MobileViTBlockv2,
+    C2fA,
 )
-from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
+from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load, ops
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
 from ultralytics.utils.loss import (
     E2EDetectLoss,
@@ -113,7 +118,7 @@ class BaseModel(torch.nn.Module):
             return self.loss(x, *args, **kwargs)
         return self.predict(x, *args, **kwargs)
 
-    def predict(self, x, profile=False, visualize=False, augment=False, embed=None):
+    def predict(self, x, profile=False, visualize=False, augment=False, embed=None, score_visualize=False):
         """
         Perform a forward pass through the network.
 
@@ -129,9 +134,9 @@ class BaseModel(torch.nn.Module):
         """
         if augment:
             return self._predict_augment(x)
-        return self._predict_once(x, profile, visualize, embed)
+        return self._predict_once(x, profile, visualize, embed, score_visualize)
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+    def _predict_once(self, x, profile=False, visualize=False, embed=None, score_visualize=False):
         """
         Perform a forward pass through the network.
 
@@ -145,20 +150,37 @@ class BaseModel(torch.nn.Module):
             (torch.Tensor): The last output of the model.
         """
         y, dt, embeddings = [], [], []  # outputs
+        scores = []
+        profilers = (
+            ops.Profile(device=x.device),
+            ops.Profile(device=x.device)
+        )
+        score_module = {'ultralytics.nn.modules.block.C2MVIT', 'ultralytics.nn.modules.block.MobileViTBlockv2',
+                        'ultralytics.nn.modules.block.C2f_attention', 'ultralytics.nn.modules.block.C2fA'}
         for m in self.model:
             if m.f != -1:  # if not from previous layer
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            x = m(x)  # run
+            if m.type in score_module and score_visualize and x.shape[0] == 1:
+                with profilers[0]:
+                    x = m(x)
+                with profilers[1]:
+                    scores.append(m.get_score())
+                LOGGER.info(f"--Inference: {profilers[0].dt * 1e3}ms, Get_Score: {profilers[1].dt * 1e3}ms--")
+            else:
+                x = m(x)
             y.append(x if m.i in self.save else None)  # save output
             if visualize:
                 feature_visualization(x, m.type, m.i, save_dir=visualize)
             if embed and m.i in embed:
-                embeddings.append(torch.nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
+                embeddings.append(nn.functional.adaptive_avg_pool2d(x, (1, 1)).squeeze(-1).squeeze(-1))  # flatten
                 if m.i == max(embed):
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        return x
+        if score_visualize:
+            return x, scores
+        else:
+            return x
 
     def _predict_augment(self, x):
         """Perform augmentations on input image x and return augmented inference."""
@@ -323,7 +345,7 @@ class DetectionModel(BaseModel):
         # Build strides
         m = self.model[-1]  # Detect()
         if isinstance(m, Detect):  # includes all Detect subclasses like Segment, Pose, OBB, WorldDetect
-            s = 256  # 2x min stride
+            s = 512  # 2x min stride
             m.inplace = self.inplace
 
             def _forward(x):
@@ -987,6 +1009,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             SCDown,
             C2fCIB,
             A2C2f,
+            C2fA
         }
     )
     repeat_modules = frozenset(  # modules with 'repeat' arguments
@@ -1006,8 +1029,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fCIB,
             C2PSA,
             A2C2f,
+            C2fA
         }
     )
+
     for i, (f, n, m, args) in enumerate(d["backbone"] + d["head"]):  # from, number, module, args
         m = (
             getattr(torch.nn, m[3:])
@@ -1041,8 +1066,9 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 legacy = False
                 if scale in "lx":  # for L/X sizes
                     args.extend((True, 1.2))
-        elif m is AIFI:
-            args = [ch[f], *args]
+        elif m in {AIFI, CBAM}:
+            c2 = ch[f]
+            args = [c2, *args]
         elif m in frozenset({HGStem, HGBlock}):
             c1, cm, c2 = ch[f], args[0], args[1]
             args = [c1, cm, c2, *args[2:]]
@@ -1073,6 +1099,17 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c2 = args[0]
             c1 = ch[f]
             args = [*args[1:]]
+        elif m is MultiSEAM:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m is SEAM:
+            c1 = c2 = ch[f]
+            args = [c1, c2, *args]
+        elif m in {MobileViTBlockv2}:
+            dim, c2, hid_dim = args[0], ch[f], args[2]
+            dim = make_divisible(dim * width, divisor=8)
+            hid_dim = make_divisible(hid_dim * width, divisor=8)
+            args = [dim, args[1], c2, hid_dim, *args[3:]]
         else:
             c2 = ch[f]
 

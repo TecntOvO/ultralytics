@@ -532,7 +532,7 @@ class AutoBackend(nn.Module):
 
         self.__dict__.update(locals())  # assign all variables to self
 
-    def forward(self, im, augment=False, visualize=False, embed=None):
+    def forward(self, im, augment=False, visualize=False, embed=None, score_visualize=False):
         """
         Runs inference on the YOLOv8 MultiBackend model.
 
@@ -553,7 +553,7 @@ class AutoBackend(nn.Module):
 
         # PyTorch
         if self.pt or self.nn_module:
-            y = self.model(im, augment=augment, visualize=visualize, embed=embed)
+            y = self.model(im, augment=augment, visualize=visualize, embed=embed, score_visualize=score_visualize)
 
         # TorchScript
         elif self.jit:
@@ -736,9 +736,12 @@ class AutoBackend(nn.Module):
 
         # for x in y:
         #     print(type(x), len(x)) if isinstance(x, (list, tuple)) else print(type(x), x.shape)  # debug shapes
-        if isinstance(y, (list, tuple)):
+        if isinstance(y, (list, tuple)) and score_visualize:
+            return self.from_numpy(y[0]), y[1]
+        elif isinstance(y, (list, tuple)) and not score_visualize:
             if len(self.names) == 999 and (self.task == "segment" or len(y) == 2):  # segments and names not defined
-                nc = y[0].shape[1] - y[1].shape[1] - 4  # y = (1, 32, 160, 160), (1, 116, 8400)
+                ip, ib = (0, 1) if len(y[0].shape) == 4 else (1, 0)  # index of protos, boxes
+                nc = y[ib].shape[1] - y[ip].shape[3] - 4  # y = (1, 160, 160, 32), (1, 116, 8400)
                 self.names = {i: f"class{i}" for i in range(nc)}
             return self.from_numpy(y[0]) if len(y) == 1 else [self.from_numpy(x) for x in y]
         else:

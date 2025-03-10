@@ -165,7 +165,7 @@ class DetectionValidator(BaseValidator):
                 self.stats[k].append(stat[k])
 
             # Save
-            if self.args.save_json:
+            if self.args.save_json or (self.coco_path is not None and not self.training):
                 self.pred_to_json(predn, batch["im_file"][si])
             if self.args.save_txt:
                 self.save_one_txt(
