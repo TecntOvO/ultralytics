@@ -378,3 +378,26 @@ class DualConv(nn.Module):
         :return: return output feature maps
         """
         return self.gc(input_data) + self.pwc(input_data)
+
+
+class GSConv(nn.Module):
+    def __init__(self, c1, c2, k=1, s=1, g=1, act=True):
+        super().__init__()
+        c_ = c2 // 2
+        # Common Conv
+        self.cv1 = Conv(c1, c_, k, s, g=g, act=act)
+        # DWConv
+        self.cv2 = Conv(c_, c_, 5, 1, g=c_, act=act)
+
+    def forward(self, x):
+        x1 = self.cv1(x)
+        x2 = torch.cat((x1, self.cv2(x1)), 1)
+        # shuffle
+        b, n, h, w = x2.shape
+        # [B,N,H,W] -> [B*N/2,2,H*W]
+        y = x2.reshape(b * n // 2, 2, h * w)
+        # [B*N/2,2,H*W] -> [2,B*N/2,H*W]
+        y = y.permute(1, 0, 2)
+        # [2,B*N/2,H*W] -> [2,B,N//2,H,W]
+        y = y.reshape(2, -1, n // 2, h, w)
+        return torch.cat((y[0], y[1]), 1)

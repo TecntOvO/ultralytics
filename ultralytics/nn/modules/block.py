@@ -657,7 +657,6 @@ class MobileViTBlockv2(nn.Module):
         super().__init__()
         self.ph = patch_size
         self.pw = patch_size
-        # assert self.ph == self.pw
         self.local_rep = nn.Sequential(
             nn.Conv2d(channel, channel, kernel_size, 1, 1, bias=False, groups=channel),
             nn.BatchNorm2d(channel),
@@ -1057,7 +1056,7 @@ class ConvMixer(nn.Module):
         if c2 != c1:
             c2 = c1
         self.DConvN = nn.Sequential(
-            nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
+            nn.Conv2d(c1, c1, kernel_size=patch_size, stride=patch_size),
             nn.GELU(),
             nn.BatchNorm2d(c2),
             *[nn.Sequential(
@@ -1193,7 +1192,6 @@ class MultiSEAM(nn.Module):
         y0 = self.DCovN0(x)
         y1 = self.DCovN1(x)
         y2 = self.DCovN2(x)
-
         y0 = self.avg_pool(y0).view(b, c)
         y1 = self.avg_pool(y1).view(b, c)
         y2 = self.avg_pool(y2).view(b, c)
@@ -1213,6 +1211,43 @@ class SPD(nn.Module):
 
     def forward(self, x):
          return torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1)
+
+
+class CBAMLayer(nn.Module):
+    def __init__(self, channel, reduction=16, spatial_kernel=7):
+        super(CBAMLayer, self).__init__()
+
+        # channel attention 压缩H,W为1
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+
+        # shared MLP
+        self.mlp = nn.Sequential(
+            # Conv2d比Linear方便操作
+            # nn.Linear(channel, channel // reduction, bias=False)
+            nn.Conv2d(channel, channel // reduction, 1, bias=False),
+            # inplace=True直接替换，节省内存
+            nn.ReLU(inplace=True),
+            # nn.Linear(channel // reduction, channel,bias=False)
+            nn.Conv2d(channel // reduction, channel, 1, bias=False)
+        )
+
+        # spatial attention
+        self.conv = nn.Conv2d(2, 1, kernel_size=spatial_kernel,
+                              padding=spatial_kernel // 2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        max_out = self.mlp(self.max_pool(x))
+        avg_out = self.mlp(self.avg_pool(x))
+        channel_out = self.sigmoid(max_out + avg_out)
+        x = channel_out * x
+
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        spatial_out = self.sigmoid(self.conv(torch.cat([max_out, avg_out], dim=1)))
+        x = spatial_out * x
+        return x
 #####################################################################
 
 
@@ -1540,7 +1575,8 @@ class C2f(nn.Module):
 class C2fA(C2f):
     def __init__(self, c1, c2, n=1, depth=1, patch_size=2, e=0.5, shortcut=True, g=1):
         super().__init__(c1, c2, n, shortcut, g, e)
-        self.m = nn.ModuleList(BottleneckMVIT2(self.c, self.c, depth, patch_size, shortcut, g, e=1.0) for _ in range(n))
+        # self.m = nn.ModuleList(BottleneckMVIT2(self.c, self.c, depth, patch_size, shortcut, g) for _ in range(n))
+        self.m = nn.ModuleList(BottleneckMVIT(self.c, self.c, depth, patch_size, shortcut, g) for _ in range(n))
 
     def get_score(self):
         context_scores = []
@@ -1656,71 +1692,90 @@ class BottleneckMVIT(nn.Module):
         """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        # self.cv1 = Conv(c1, c_, 1, 1)
-        # self.cv2 = Conv(c_, c2, 1, 1, g=g)
-        if k[0] == 3:
-            # DWConv
-            self.cv1 = nn.Sequential(
-                nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
-                nn.BatchNorm2d(c1),
-                nn.SiLU(),
-                nn.Conv2d(c1, c_, 1, 1, 0, bias=False)
-            )
-        if k[1] == 3:
-            # DWConv
-            self.cv2 = nn.Sequential(
-                nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
-                nn.BatchNorm2d(c_),
-                nn.SiLU(),
-                nn.Conv2d(c_, c2, 1, 1, 0, bias=False)
-            )
-
-
-        self.attn = MobileViTBlockv2(c_, depth, c_, 2 * c_, patch_size)
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
+        # self.cv1 = nn.Sequential(
+        #     nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
+        #     nn.BatchNorm2d(c1),
+        #     nn.SiLU(),
+        #     nn.Conv2d(c1, c_, 1, 1, 0, bias=False),
+        #     nn.BatchNorm2d(c_),
+        #     nn.SiLU()
+        # )
+        # self.cv2 = nn.Sequential(
+        #     nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
+        #     nn.BatchNorm2d(c_),
+        #     nn.SiLU(),
+        #     nn.Conv2d(c_, c2, 1, 1, 0, bias=False),
+        #     nn.BatchNorm2d(c2),
+        #     nn.SiLU()
+        # )
+        # self.attn = MobileViTBlockv2(c_ , depth, c_, c_ * 2, patch_size)
+        self.attn = MobileViTBlockv2(c2, depth, c2, 2 * c2, patch_size)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
         """Applies the YOLO FPN to input data."""
-        return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2self.attn((self.cv1(x)))
+        # return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2(self.attn(self.cv1(x)))
+        return x + self.attn(self.cv2(self.cv1(x))) if self.add else self.attn(self.cv2(self.cv1(x)))
 
     def get_score(self):
         return self.attn.get_score()
 
 
 class BottleneckMVIT2(nn.Module):
-
-    def __init__(self, c1, c2, depth, patch_size=2, shortcut=True, g=1, k=(3, 3), e=0.5):
+    def __init__(self, c1, c2, depth, patch_size=2, shortcut=True, g=1, k=(3, 3), e=0.5, reduction=16):
         """Initializes a standard bottleneck module with optional shortcut connection and configurable parameters."""
         super().__init__()
         c_ = int(c2 * e)  # hidden channels
-        # self.cv1 = Conv(c1, c_, 1, 1)
-        # self.cv2 = Conv(c_, c2, 1, 1, g=g)
-        if k[0] == 3:
-            # DWConv
-            self.cv1 = nn.Sequential(
-                nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
-                nn.BatchNorm2d(c1),
-                nn.SiLU(),
-                nn.Conv2d(c1, c_, 1, 1, 0, bias=False)
-            )
-        if k[1] == 3:
-            # DWConv
-            self.cv2 = nn.Sequential(
-                nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
-                nn.BatchNorm2d(c_),
-                nn.SiLU(),
-                nn.Conv2d(c_, c2, 1, 1, 0, bias=False)
-            )
+        self.cv1 = Conv(c1, c_, k[0], 1)
+        self.cv2 = Conv(c_, c2, k[1], 1, g=g)
 
-        self.channel_attn = ConvMixer(c_, c_, 1, 3, 3)
-        self.attn = MobileViTBlockv2(c_, depth, c_, 2 * c_, patch_size)
+        # channel attention
+        # self.max_pool = nn.AdaptiveMaxPool2d(1)
+        # self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        # self.mlp = nn.Sequential(
+        #     # Conv2d比Linear方便操作
+        #     # nn.Linear(channel, channel // reduction, bias=False)
+        #     nn.Conv2d(c_, c_ // reduction, 1, bias=False),
+        #     # inplace=True直接替换，节省内存
+        #     nn.ReLU(inplace=True),
+        #     # nn.Linear(channel // reduction, channel,bias=False)
+        #     nn.Conv2d(c_ // reduction, c_, 1, bias=False)
+        # )
+        # self.sigmoid = nn.Sigmoid()
+
+        # bottle
+        # if k[0] == 3:
+        #     # DW-Point-Conv
+        #     self.cv1 = nn.Sequential(
+        #         nn.Conv2d(c1, c1, 3, 1, 1, bias=False, groups=c1),
+        #         nn.BatchNorm2d(c1),
+        #         nn.SiLU(),
+        #         nn.Conv2d(c1, c_, 1, 1, 0, bias=False),
+        #         nn.BatchNorm2d(c_),
+        #         nn.SiLU()
+        #     )
+        # if k[1] == 3:
+        #     # DW-Point-Conv
+        #     self.cv2 = nn.Sequential(
+        #         nn.Conv2d(c_, c_, 3, 1, 1, bias=False, groups=c_),
+        #         nn.BatchNorm2d(c_),
+        #         nn.SiLU(),
+        #         nn.Conv2d(c_, c2, 1, 1, 0, bias=False),
+        #         nn.BatchNorm2d(c2),
+        #         nn.SiLU()
+        #     )
+
+        # self.channel_attn = ConvMixer(c2, c2, 1, 3, 3)
+        self.attn = CBAMLayer(c_)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
         """Applies the YOLO FPN to input data."""
-        return x + self.cv2(self.attn(self.channel_attn(self.cv1(x)))) \
+        return x + self.cv2(self.attn(self.cv1(x))) \
             if self.add \
-            else self.cv2(self.attn(self.channel_attn(self.cv1(x))))
+            else self.cv2(self.attn(self.cv1(x)))
 
     def get_score(self):
         return self.attn.get_score()
@@ -2452,12 +2507,20 @@ class C2MVIT(C2PSA):
     def __init__(self, c1, c2, depth=1, patch_size=2, e=0.5):
         """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
         super().__init__(c1, c2, 0, e)
-        self.cv1 = DWConv(c1, 2 * self.c, 1, 1)
-        self.cv2 = DWConv(2 * self.c, c1, 1, 1)
+        # self.cv1 = DWConv(c1, 2 * self.c, 1, 1)
+        # self.cv2 = DWConv(2 * self.c, c1, 1)
         self.m = MobileViTBlockv2(self.c, depth, self.c, 2 * self.c, patch_size)
 
     def get_score(self):
         return self.m.get_score()
+
+
+class C2CBAM(C2PSA):
+
+    def __init__(self, c1, c2, n=1, e=0.5):
+        """Initializes the C2PSA module with specified input/output channels, number of layers, and expansion ratio."""
+        super().__init__(c1, c2, 0, e)
+        self.m = nn.Sequential(*(CBAMLayer(self.c) for _ in range(n)))
 
 
 class C2fPSA(C2f):

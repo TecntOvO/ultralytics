@@ -1,5 +1,7 @@
-# Ultralytics YOLO 🚀, AGPL-3.0 license
-# Default training settings and hyperparameters for medium-augmentation COCO training
+# Ultralytics 🚀 AGPL-3.0 License - https://ultralytics.com/license
+
+# Global configuration YAML with settings and hyperparameters for YOLO training, validation, prediction and export
+# For documentation see https://docs.ultralytics.com/usage/cfg/
 
 task: detect # (str) YOLO task, i.e. detect, segment, classify, pose, obb
 mode: train # (str) YOLO mode, i.e. train, val, predict, export, track, benchmark
@@ -11,7 +13,7 @@ epochs: 100 # (int) number of epochs to train for
 time: # (float, optional) number of hours to train for, overrides epochs if supplied
 patience: 100 # (int) epochs to wait for no observable improvement for early stopping of training
 batch: 16 # (int) number of images per batch (-1 for AutoBatch)
-imgsz: 648 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
+imgsz: 640 # (int | list) input images size as int for train and val modes, or list[h,w] for predict and export modes
 save: True # (bool) save train checkpoints and predict results
 save_period: -1 # (int) Save checkpoint every x epochs (disabled if < 1)
 cache: False # (bool) True/ram, disk or False. Use cache for data loading
@@ -92,6 +94,8 @@ nms: False # (bool) CoreML: add NMS
 # Hyperparameters ------------------------------------------------------------------------------------------------------
 lr0: 0.01 # (float) initial learning rate (i.e. SGD=1E-2, Adam=1E-3)
 lrf: 0.01 # (float) final learning rate (lr0 * lrf)
+repgt_weight: 0.0
+repbox_weight: 0.0
 momentum: 0.937 # (float) SGD momentum/Adam beta1
 weight_decay: 0.0005 # (float) optimizer weight decay 5e-4
 warmup_epochs: 3.0 # (float) warmup epochs (fractions ok)
@@ -127,3 +131,11 @@ cfg: # (str, optional) for overriding defaults.yaml
 
 # Tracker settings ------------------------------------------------------------------------------------------------------
 tracker: botsort.yaml # (str) tracker type, choices=[botsort.yaml, bytetrack.yaml]
+
+# IOUloss settings ------------------------------------------------------------------------------------------------------
+iou_type: Ciou  # 支持iou/Giou/Diou/Ciou/Siou/Eiou/Wise-iou/MPDiou/Shape-iou/Powerful-iou/Unified-iou
+Inner_iou: False  # 仅支持iou/Giou/Diou/Ciou/Siou/Eiou/Wise-iou/MPDiou/Shape-iou/Unified-iou, 不与alpha系列共用
+Focal: False  # 仅支持iou/Giou/Diou/Ciou/Siou/Eiou/Unified-iou
+Focaler: False  # 仅支持iou/Giou/Diou/Ciou/Siou/Eiou//MPDiou/Shape-iou/Unified-iou
+alpha: 1  # 仅支持iou/Giou/Diou/Ciou/Siou/Eiou, 不与Inner_iou系列共用, 默认值为1
+ratio: 0.7 # inner_iou的比例因子，默认为0.7

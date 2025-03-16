@@ -326,7 +326,7 @@ class BasePredictor:
         self.args.half = self.model.fp16  # update half
         self.model.eval()
 
-    def write_results(self, i, p, im, s, score = None):
+    def write_results(self, i, p, im, s, score = False):
         """Write inference results to a file or directory."""
         import seaborn
         import matplotlib.pyplot as plt
@@ -344,7 +344,6 @@ class BasePredictor:
             frame = int(match[1]) if match else None  # 0 if frame undetermined
 
         self.txt_path = self.save_dir / "labels" / (p.stem + ("" if self.dataset.mode == "image" else f"_{frame}"))
-        score_folder = self.save_dir / p.name
         if self.args.save_score:
             (self.save_dir / p.name[:-4]).mkdir(parents=True, exist_ok=True)
         string += "{:g}x{:g} ".format(*im.shape[2:])
@@ -366,7 +365,6 @@ class BasePredictor:
                 for score_idx, score_tensor in enumerate(score_tuple):
                     score_feature = score_tensor.cpu().numpy().squeeze()
                     seaborn.heatmap(score_feature, xticklabels=False, yticklabels=False, cbar=False, cmap='seismic')
-                    # plt.imshow(score_feature, cmap='hot', interpolation='nearest')
                     plt.tight_layout(pad=0.0)
                     plt.savefig(self.save_dir / p.name[:-4]/ f'MVIT_Block{block_idx + 1}_Score{score_idx + 1}.png')
                     plt.close()

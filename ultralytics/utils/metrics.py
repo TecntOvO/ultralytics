@@ -238,67 +238,142 @@ def bbox_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, eps=1e-7
         return iou - (c_area - union) / c_area  # GIoU https://arxiv.org/pdf/1902.09630.pdf
     return iou  # IoU
 
-def RepGT_iog(box1, box2, x1y1x2y2=True):
-    box2 = box2.t()
-    if x1y1x2y2:
-        # x1, y1, x2, y2 = box1
-        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
-        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
-    else:
-        # x, y, w, h = box1
-        b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
-        b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
-        b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
-        b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
-    inter_area = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
-        (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
-    g_area = torch.abs(b2_x2-b2_x1) * torch.abs(b2_y2-b2_y1)
-    iog = inter_area/g_area
+
+def RepGT_iog(box1, box2, xywh=True):
+    if xywh:  # transform from xywh to xyxy
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
+        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
+        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
+    else:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+    inter = (b1_x2.minimum(b2_x2) - b1_x1.maximum(b2_x1)).clamp_(0) * (
+            b1_y2.minimum(b2_y2) - b1_y1.maximum(b2_y1)).clamp_(0)
+    g_area = torch.abs(b2_x2 - b2_x1) * torch.abs(b2_y2 - b2_y1)
+    iog = inter / g_area
     return iog
 
-def RepGT_loss(box1, box2, x1y1x2y2=False):
-    iog_loss = 0
-    # P+ 正候选框
-    proposal = bbox_iou(box1, box2, x1y1x2y2) > 0.5
-    for m in range(box1.size(1)):
-        if proposal[m]:
-            # 在除去预测框本身要回归的所有真实框中，找到和预测框iou最大的真实框
-            iou=bbox_iou(box1[:, m], box2, x1y1x2y2)
-            iou[m] = 0
-            max_LOG = torch.argmax(iou)
-            IOG = RepGT_iog(box1[:, m], box2[max_LOG.item(),:], x1y1x2y2)
-            if IOG >0.5:
-                iog_loss += 2*IOG-0.3  #alfa=0.5
-            else:
-                IOG = 1-IOG
-                iog_loss += -IOG.log()
 
-    if proposal.sum():
-        return iog_loss / proposal.sum()
-    else:
-        return 0
+def RepGT_loss(box1, box2, weight_iou, xywh=False, sigma=0.5):
+    # box1 -> pred,box2 -> target
+    assert 0.0 <= sigma <= 1.0
+    sigma = torch.tensor(sigma).to(box1.device)
 
-def RepBox_loss(box, x1y1x2y2=False):
-    total = 0
-    bbox_sum = 0
-    for m in range(box.size(1)):
-        iou_list = bbox_iou(box[:, m], box[:, m:].t(), x1y1x2y2)
-        counter = iou_list > 0
-        counter = counter.sum() - 1
-        if counter > 0:
-            for iou_unit in range(len(iou_list)):
-                if iou_list[iou_unit] > 0.5:
-                    iou_list[iou_unit] = 2 * iou_list[iou_unit] - 0.3
-                else:
-                    iou_list[iou_unit] = 1 - iou_list[iou_unit]
-                    #iou_list[iou_unit] = -torch.log(iou_list[iou_unit])
-            bbox_sum += (iou_list.sum()-1.7)
-            total += counter
-    #print('bbox_sum','total', bbox_sum, total)
-    if total:
-        return bbox_sum / total
-    else:
-        return 0
+    # 计算全量IOU矩阵 (M, M)，每列为预测，每行为真实
+    all_iou = bbox_iou(box1.unsqueeze(dim=0), box2.unsqueeze(dim=1), xywh).squeeze(dim=-1)  # 实现需支持批量计算
+
+
+    # 获取有效样本掩膜
+    mask = all_iou.diagonal() > 0.5
+
+    # 无有效样本时提前返回
+    if not mask.any():
+        return torch.tensor(0.0, device=box1.device)
+
+    all_iou = all_iou * weight_iou.t()
+
+    # 将对角线置0
+    all_iou_zeros = all_iou - all_iou.diagonal().diag()
+
+    # 找到每列最大的元素下标（， M)（对应每个预测框除了自己要回归的gt框外，其它框中与它iou最大的）
+    max_indices = torch.argmax(all_iou_zeros, dim=0)
+
+    # 找到对应的真实框(M,4)
+    match_target_box = box2[max_indices]
+
+    # 计算考虑样本的IOG
+    IOG = RepGT_iog(box1[mask, :], match_target_box[mask, :], xywh).squeeze(-1)
+
+    # 应用smooth_ln
+    IOG_smooth = torch.where(
+        IOG > sigma,
+        (IOG - sigma) / (1 - sigma) - torch.log(1 - sigma),
+        -torch.log(1 - IOG)
+    )
+
+    return IOG_smooth.mean()
+
+# def RepGT_iog(box1, box2, x1y1x2y2=True):
+#     box2 = box2.t()
+#     if x1y1x2y2:
+#         # x1, y1, x2, y2 = box1
+#         b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+#         b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+#     else:
+#         # x, y, w, h = box1
+#         b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+#         b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+#         b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+#         b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+#     inter_area = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+#         (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+#     g_area = torch.abs(b2_x2-b2_x1) * torch.abs(b2_y2-b2_y1)
+#     iog = inter_area/g_area
+#     return iog
+#
+# def RepGT_loss(box1, box2, x1y1x2y2=False):
+#     iog_loss = 0
+#     # P+ 正候选框
+#     proposal = bbox_iou(box1, box2, x1y1x2y2) > 0.5
+#     for m in range(box1.size(1)):
+#         if proposal[m]:
+#             # 在除去预测框本身要回归的所有真实框中，找到和预测框iou最大的真实框
+#             iou=bbox_iou(box1[:, m], box2, x1y1x2y2)
+#             iou[m] = 0
+#             max_LOG = torch.argmax(iou)
+#             IOG = RepGT_iog(box1[:, m], box2[max_LOG.item(),:], x1y1x2y2)
+#             if IOG >0.5:
+#                 iog_loss += 2*IOG-0.3  #alfa=0.5
+#             else:
+#                 IOG = 1-IOG
+#                 iog_loss += -IOG.log()
+#
+#     if proposal.sum():
+#         return iog_loss / proposal.sum()
+#     else:
+#         return 0
+
+def RepBox_loss(box, xywh=False, sigma=0.5):
+    assert 0.0 <= sigma <= 1.0
+    sigma = torch.tensor(sigma).to(box.device)
+
+    all_iou = bbox_iou(box.unsqueeze(dim=0), box.unsqueeze(dim=1), xywh).squeeze(-1)
+
+    upper_triangle_part = torch.triu(all_iou, diagonal=1)
+    nonzero_count = (upper_triangle_part != 0).sum()
+
+    if nonzero_count == 0:
+        return torch.tensor(0.0, device=box.device)
+
+    bbox_loss = torch.where(
+        upper_triangle_part > sigma,
+        (upper_triangle_part - sigma) / (1 - sigma) - torch.log(1 - sigma),
+        -torch.log(1 - upper_triangle_part)
+    )
+
+    return bbox_loss.sum() / nonzero_count
+
+    # total = 0
+    # bbox_sum = 0
+    # for m in range(box.size(1)):
+    #     iou_list = bbox_iou(box[:, m], box[:, m:].t(), xywh)
+    #     counter = iou_list > 0
+    #     counter = counter.sum() - 1
+    #     if counter > 0:
+    #         for iou_unit in range(len(iou_list)):
+    #             if iou_list[iou_unit] > 0.5:
+    #                 iou_list[iou_unit] = 2 * iou_list[iou_unit] - 0.3
+    #             else:
+    #                 iou_list[iou_unit] = 1 - iou_list[iou_unit]
+    #                 #iou_list[iou_unit] = -torch.log(iou_list[iou_unit])
+    #         bbox_sum += (iou_list.sum()-1.7)
+    #         total += counter
+    # #print('bbox_sum','total', bbox_sum, total)
+    # if total:
+    #     return bbox_sum / total
+    # else:
+    #     return 0
 
 def mask_iou(mask1, mask2, eps=1e-7):
     """

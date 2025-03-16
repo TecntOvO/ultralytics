@@ -352,7 +352,7 @@ class Model(nn.Module):
             p.requires_grad = True
         return self
 
-    def load(self, weights: Union[str, Path] = "yolo11n.pt") -> "Model":
+    def load(self, weights: Union[str, Path] = "yolo11n.pt", mask=None) -> "Model":
         """
         Loads parameters from the specified weights file into the model.
 
@@ -377,8 +377,14 @@ class Model(nn.Module):
         if isinstance(weights, (str, Path)):
             self.overrides["pretrained"] = weights  # remember the weights for DDP training
             weights, self.ckpt = attempt_load_one_weight(weights)
-        self.model.load(weights)
+        self.model.load(weights, mask=mask)
         return self
+
+    def load_(self, weights: Union[str, Path] = "yolo11n.pt") -> "Model":
+        from ultralytics.nn.tasks import torch_safe_load
+        self._check_is_pytorch_model()
+        ckpt, _ = torch_safe_load(weights)
+        self.model.load_(ckpt)
 
     def save(self, filename: Union[str, Path] = "saved_model.pt") -> None:
         """
@@ -795,10 +801,10 @@ class Model(nn.Module):
         args = {**overrides, **custom, **kwargs, "mode": "train"}  # highest priority args on the right
         if args.get("resume"):
             args["resume"] = self.ckpt_path
-        if args["save_score"]:
+        if args.get("save_score"):
             LOGGER.warning("save_score is forbidden when training,setting 'save_score=False'")
             args["save_score"] = False
-        if args["export_coco_result"] and args["val_coco"] is None:
+        if args.get("export_coco_result") and args.get("val_coco") is None:
             LOGGER.warning("val_coc is required when export_coco_result is True,setting 'export_coco_result=False'")
             args["export_coco_result"] = False
 

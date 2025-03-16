@@ -17,6 +17,8 @@ Example:
     ```
 """
 
+from .backbone import *
+
 from .block import (
     C1,
     C2,
@@ -68,7 +70,9 @@ from .block import (
     C2MVIT,
     C2f_attention,
     C2fA,
-    SPD
+    SPD,
+    CBAMLayer,
+    C2CBAM
 )
 from .conv import (
     CBAM,
@@ -86,9 +90,9 @@ from .conv import (
     SpatialAttention,
     WeightedConcat,
     DualConv,
-
+    GSConv
 )
-from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect
+from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, SEAM_Detect, CBAM_Detect
 from .transformer import (
     AIFI,
     MLP,

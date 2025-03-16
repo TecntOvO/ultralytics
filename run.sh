@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # 训练脚本列表
-train_scripts=( "train.py" "train.py" )
+train_scripts=( "train2.py" "train.py" )
 log_dir="runs/log"
 
 # 确保日志目录存在

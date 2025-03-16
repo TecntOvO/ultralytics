@@ -11,7 +11,7 @@ import torch
 import torch.nn.functional as F
 
 from ultralytics.utils import LOGGER
-from ultralytics.utils.metrics import batch_probiou
+from ultralytics.utils.metrics import batch_probiou, bbox_iou
 
 
 class Profile(contextlib.ContextDecorator):
@@ -159,6 +159,86 @@ def nms_rotated(boxes, scores, threshold=0.45):
     return sorted_idx[pick]
 
 
+def soft_nms(boxes, scores, soft_threshold=0.01, iou_threshold=0.7, weight_method=1, sigma=0.5):
+    """
+    :param boxes: [N, 4]， 此处传进来的框，是经过筛选（选取的得分TopK）之后的
+    :param scores: [N]
+    :param iou_threshold: 0.7
+    :param soft_threshold soft nms 过滤掉得分太低的框 （手动设置）
+    :param weight_method 权重方法 1. 线性 2. 高斯
+    :return:
+    """
+
+
+    keep = []
+    idxs = scores.argsort()
+    while idxs.numel() > 0:  # 循环直到null； numel()： 数组元素个数
+        # 由于scores得分会改变，所以每次都要重新排序，获取得分最大值
+        idxs = scores.argsort()  # 评分排序
+        if idxs.size(0) == 1:  # 就剩余一个框了；
+            keep.append(idxs[-1])
+            break
+        keep_len = len(keep)
+        # 例如idxs一共4个值，进行一轮之后只看前3个了，再一轮之后只看前2个了....
+        # 后面的那些并不像以前一样直接删掉，因为可能每次乘了一些值之后又往前提了
+        max_score_index = idxs[-(keep_len + 1)]
+        max_score_box = boxes[max_score_index][None, :]  # [1, 4]
+        idxs = idxs[:-(keep_len + 1)]
+        other_boxes = boxes[idxs]  # [?, 4]
+        keep.append(max_score_index)  # 位置不能边
+        ious = bbox_iou(max_score_box, other_boxes, xywh=False)  # 一个框和其余框比较 1XM
+        # Soft NMS 处理， 和 得分最大框 IOU大于阈值的框， 进行得分抑制
+        if weight_method == 1:  # 线性抑制  # 整个过程 只修改分数
+            mask = ious[:, 0] >= iou_threshold
+            ge_threshod_idxs = idxs[mask]
+            weight = 1.0 - ious[mask, :]
+            scores[ge_threshod_idxs] *= weight.squeeze(-1)  # 小于IoU阈值的不变
+            # idxs = idxs[scores[idxs] >= soft_threshold]  # 小于soft_threshold删除， 经过抑制后 阈值会越来越小；
+        elif weight_method == 2:  # 高斯抑制， 不管大不大于阈值，都计算权重
+            decay = torch.exp(-(ious ** 2) / sigma)
+            scores[idxs] *= decay  # 权重(0, 1]
+            # idxs = idxs[scores[idxs] >= soft_threshold]
+    keep = idxs.new(keep)  # Tensor
+    keep = keep[scores[keep] > soft_threshold]  # 最后处理阈值
+    # boxes = boxes[keep]  # 保留下来的框
+    # scores = scores[keep]  # soft nms抑制后得分
+    return torch.LongTensor(keep)
+
+
+# def soft_nms(bboxes, scores, iou_thresh=0.5, sigma=0.5, score_threshold=0.25):
+#     order = torch.arange(0, scores.size(0)).to(bboxes.device)
+#     keep = []
+#
+#     while order.numel() > 1:
+#         if order.numel() == 1:
+#             keep.append(order[0])
+#             break
+#         else:
+#             max_score_idx = scores.argmax(-1)
+#             i = order[max_score_idx]
+#             keep.append(i)
+#
+#         # 修改成你想要使用的IOU,如果不修改默认的就是普通iou
+#         iou = bbox_iou(bboxes[i], bboxes[order[1:]], xywh=False).squeeze()
+#
+#         idx = (iou > iou_thresh).nonzero().squeeze()
+#         if idx.numel() > 0:
+#             iou = iou[idx]
+#             newScores = torch.exp(-torch.pow(iou, 2) / sigma)
+#             scores[order[idx + 1]] *= newScores
+#
+#         newOrder = (scores[order[1:]] > score_threshold).nonzero().squeeze()
+#         if newOrder.numel() == 0:
+#             break
+#         else:
+#             maxScoreIndex = torch.argmax(scores[order[newOrder + 1]])
+#             if maxScoreIndex != 0:
+#                 newOrder[[0, maxScoreIndex],] = newOrder[[maxScoreIndex, 0],]
+#             order = order[newOrder + 1]
+#
+#     return torch.LongTensor(keep)
+
+
 def non_max_suppression(
     prediction,
     conf_thres=0.25,
@@ -289,6 +369,7 @@ def non_max_suppression(
         else:
             boxes = x[:, :4] + c  # boxes (offset by class)
             i = torchvision.ops.nms(boxes, scores, iou_thres)  # NMS
+            # i = soft_nms(boxes, scores, iou_threshold=iou_thres)
         i = i[:max_det]  # limit detections
 
         # # Experimental

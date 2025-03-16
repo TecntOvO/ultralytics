@@ -4,6 +4,7 @@ import contextlib
 import pickle
 import re
 import types
+from collections import OrderedDict
 from copy import deepcopy
 from pathlib import Path
 
@@ -76,7 +77,14 @@ from ultralytics.nn.modules import (
     C2f_attention,
     DualConv,
     C2fA,
-    SPD
+    SPD,
+    SEAM_Detect,
+    CBAMLayer,
+    CBAM_Detect,
+    C2CBAM,
+    GSConv,
+    MConv2d,
+    UIB
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -297,20 +305,51 @@ class BaseModel(nn.Module):
             m.strides = fn(m.strides)
         return self
 
-    def load(self, weights, verbose=True):
+    def load(self, weights, verbose=True, mask: dict = None):
         """
         Load the weights into the model.
 
         Args:
+            mask: (dict)
             weights (dict | torch.nn.Module): The pre-trained weights to be loaded.
             verbose (bool, optional): Whether to log the transfer progress. Defaults to True.
         """
         model = weights["model"] if isinstance(weights, dict) else weights  # torchvision models are not dicts
         csd = model.float().state_dict()  # checkpoint state_dict as FP32
+        if mask:
+            import re
+            pattern = re.compile(r'(?<=model\.)\d+')
+            csd_mapping = OrderedDict()
+            for name, weight in csd.items():
+                result = pattern.search(name)
+                if result and len(result.regs) == 1:
+                    level = int(result.group())
+                    new_level = mask.get(level, "No")
+                    if new_level != "No":
+                        new_name = name[:result.regs[0][0]] + str(new_level) + name[result.regs[0][1]:]
+                        # check name existence and weight shape match
+                        self_weight = self.state_dict().get(new_name, None)
+                        if self_weight is not None and self_weight.shape == weight.shape:
+                            new_key = new_name
+                            LOGGER.info(f"Transferring pretrained model's module {name} to {new_name} with weight！")
+                        else:
+                            # LOGGER.warning(f"Failed to map {name}{[*weight.shape]}) to {new_name}{[*self_weight.shape]}！")
+                            new_key = name
+                    else:
+                        new_key = name
+                else:
+                    # LOGGER.warning(f"Failed to transfer {name}！")
+                    new_key = name
+                csd_mapping[new_key] = weight
+            csd = csd_mapping
         csd = intersect_dicts(csd, self.state_dict())  # intersect
         self.load_state_dict(csd, strict=False)  # load
         if verbose:
             LOGGER.info(f"Transferred {len(csd)}/{len(self.model.state_dict())} items from pretrained weights")
+
+    def load_(self, csd):
+        csd = intersect_dicts(csd, self.state_dict())  # intersect
+        self.load_state_dict(csd, strict=False)  # load
 
     def loss(self, batch, preds=None):
         """
@@ -1038,6 +1077,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2f_attention,
             DualConv,
             C2fA,
+            CBAMLayer,
+            C2CBAM,
+            GSConv,
+            MConv2d
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1063,7 +1106,8 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fPSA,
                 C2fCIB,
                 C2PSA,
-                C2fA
+                C2fA,
+                C2CBAM
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1086,11 +1130,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [ch[f]]
         elif m is Concat:
             c2 = sum(ch[x] for x in f)
-        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect}:
+        elif m in {Detect, WorldDetect, Segment, Pose, OBB, ImagePoolingAttn, v10Detect, SEAM_Detect, CBAM_Detect}:
             args.append([ch[x] for x in f])
             if m is Segment:
                 args[2] = make_divisible(min(args[2], max_channels) * width, 8)
-            if m in {Detect, Segment, Pose, OBB}:
+            if m in {Detect, Segment, Pose, OBB, SEAM_Detect, CBAM_Detect}:
                 m.legacy = legacy
         elif m is RTDETRDecoder:  # special case, channels arg must be passed in index 1
             args.insert(1, [ch[x] for x in f])
@@ -1122,6 +1166,10 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             args = [len(f), *args]
         elif m is SPD:
             c2 = 4 * ch[f]
+        elif m is UIB:
+            c1, c2 = ch[f], args[0]
+            c2 = make_divisible(min(c2, max_channels) * width, divisor=8)
+            args = [c1, c2, *args[1:]]
         else:
             c2 = ch[f]
 

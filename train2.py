@@ -1,86 +1,29 @@
 from ultralytics import YOLO
+import os
 
 if __name__ == '__main__':
-    # model = YOLO(r"yolo11+ViT.yaml")
-    # model = YOLO(r"yolov11-ViTv2.yaml")
-    # model = YOLO(r"yolo11n.yaml")
-    # model = YOLO(r"yolo11s.yaml")
-    # model = YOLO(r"yolov11-ViTv2-NewNeck-test4-xxs.yaml").load(
-    #     r"D:\Yolov11\ultralytics\runs\detect\compare in newNeck\new new data\mv2-cov24-xxs-0.001-ffndrop0.0 allmv2\weights\best.pt")
-    model = YOLO(r"yoloA11-3-1.yaml")
-    model.load(r"yolo11n.pt")
+    os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
+
+    model = YOLO(r"yolo11A11-9.yaml")
+    # model.load(r"yolo11n.pt")
+    model.load_(r"mobilevitv2-0.5.pt")
     model.train(
-        # data="straberry_enh.yaml",  # path to dataset YAML
         # data="straberry.yaml",
-        data="straberry_.yaml",
-        epochs=150,  # number of training epochs
-        lr0=0.001,
-        cfg="ours.yaml",
+        data="straberry__enhance.yaml",
+        epochs=120,  # number of training epochs
+        cfg='ours.yaml',
+        lr0=0.0001,
+        lrf=0.01,
         rect=True,
         batch=32,
-        resume=False
+        resume=True,
+        cos_lr=True,
+        export_coco_result=False,
+        weight_decay=0.0007,
+        patience=50,
+        val_coco=r"D:\Yolov11\datasets\split_whole_enhance_8-2_new\instances_val2017.json",
+        iou_type='MPDiou',
+        Inner_iou=True,
+        ratio=0.85,
+        workers=8
     )
-
-
-    # print('####################################################################')
-    # model = YOLO(r"yoloA11-2.yaml")
-    # model.load(r"yolo11n.pt")
-    # model.train(
-    #     # data="straberry_enh.yaml",  # path to dataset YAML
-    #     # data="straberry.yaml",
-    #     data="straberry_.yaml",
-    #     epochs=1,  # number of training epochs
-    #     lr0=0.001,
-    #     cfg="ours.yaml",
-    #     rect=True,
-    #     batch=32,
-    #     resume=False
-    # )
-    # print('####################################################################')
-    # model = YOLO(r"yolo11n.pt")
-    # model.train(
-    #     # data="straberry_enh.yaml",  # path to dataset YAML
-    #     # data="straberry.yaml",
-    #     data="straberry_.yaml",
-    #     epochs=150,  # number of training epochs
-    #     lr0=0.001,
-    #     cfg="ours.yaml",
-    #     rect=True,
-    #     batch=32
-    # )
-    # print('####################################################################')
-    # model = YOLO(r"yoloA11-2.yaml")
-    # model.load(r"yolo11n.pt")
-    # model.train(
-    #     # data="straberry_enh.yaml",  # path to dataset YAML
-    #     # data="straberry.yaml",
-    #     data="straberry_.yaml",
-    #     epochs=150,  # number of training epochs
-    #     lr0=0.001,
-    #     cfg="ours.yaml",
-    #     rect=True,
-    #     batch=32
-    # )
-    # print('####################################################################')
-    # model = YOLO(r"yoloA11-3.yaml")
-    # model.load(r"yolo11n.pt")
-    # model.train(
-    #     # data="straberry_enh.yaml",  # path to dataset YAML
-    #     # data="straberry.yaml",
-    #     data="straberry_.yaml",
-    #     epochs=150,  # number of training epochs
-    #     lr0=0.001,
-    #     cfg="ours.yaml",
-    #     rect=True,
-    #     batch=32
-    # )
-    # model.train(
-    #     # data="straberry_enh.yaml",  # path to dataset YAML
-    #     # data="straberry.yaml",
-    #     data="straberry_.yaml",
-    #     epochs=250,  # number of training epochs
-    #     lr0=0.001,
-    #     cfg="ours.yaml",
-    #     rect=True,
-    #     batch=32
-    # )
