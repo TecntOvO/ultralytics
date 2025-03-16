@@ -1,6 +1,6 @@
 path: D:\Yolov11\intense_detect\MOT20-01\data_1_enhance # dataset root dir
 train: images/train # train images (relative to 'path') 128 images
-val: images/val # val images (relative to 'path') 128 images
+val: images/test # val images (relative to 'path') 128 images
 test: images/test
 
 # Classes

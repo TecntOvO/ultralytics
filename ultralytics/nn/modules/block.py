@@ -336,19 +336,19 @@ class MultiSEAM(nn.Module):
             return nn.Sequential(
                 # Patch Embedding
                 nn.Conv2d(c1, c2, kernel_size=patch_size, stride=patch_size),
-                nn.GELU(),
+                nn.SiLU(),
                 nn.BatchNorm2d(c2),
                 *[nn.Sequential(
                     # 深度可分离卷积
                     Residual(nn.Sequential(
                         nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=kernel_size, stride=1, padding=1,
                                   groups=c2),
-                        nn.GELU(),
+                        nn.SiLU(),
                         nn.BatchNorm2d(c2)
                     )),
                     # 逐点卷积
                     nn.Conv2d(in_channels=c2, out_channels=c2, kernel_size=1, stride=1, padding=0, groups=1),
-                    nn.GELU(),
+                    nn.SiLU(),
                     nn.BatchNorm2d(c2)
                 ) for i in range(depth)]
             )
@@ -619,14 +619,14 @@ class BottleneckMVIT(nn.Module):
         c_ = int(c2 * e)  # hidden channels
         self.cv1 = Conv(c1, c_, k[0], 1)
         self.cv2 = Conv(c_, c2, k[1], 1, g=g)
-        self.attn = MobileViTBlockv2(c_ , depth, c_, c_ * 2, patch_size)
-        # self.attn = MobileViTBlockv2(c_, depth, c_, 2 * c_, patch_size)
+        # self.attn = MobileViTBlockv2(c_ , depth, c_, c_ * 2, patch_size)
+        self.attn = MobileViTBlockv2(c2, depth, c2, 2 * c2, patch_size)
         self.add = shortcut and c1 == c2
 
     def forward(self, x):
         """Applies the YOLO FPN to input data."""
-        return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2(self.attn(self.cv1(x)))
-        # return x + self.attn(self.cv2(self.cv1(x))) if self.add else self.attn(self.cv2(self.cv1(x)))
+        # return x + self.cv2(self.attn(self.cv1(x))) if self.add else self.cv2(self.attn(self.cv1(x)))
+        return x + self.attn(self.cv2(self.cv1(x))) if self.add else self.attn(self.cv2(self.cv1(x)))
 
     def get_score(self):
         return self.attn.get_score()
@@ -636,7 +636,7 @@ class C2fA(C2f):
     def __init__(self, c1, c2, n=1, depth=1, patch_size=2, e=0.5, shortcut=True, g=1):
         super().__init__(c1, c2, n, shortcut, g, e)
         # self.m = nn.ModuleList(BottleneckMVIT2(self.c, self.c, depth, patch_size, shortcut, g) for _ in range(n))
-        self.m = nn.ModuleList(BottleneckMVIT(self.c, self.c, depth, patch_size, shortcut, g) for _ in range(n))
+        self.m = nn.ModuleList(BottleneckMVIT(self.c, self.c, depth, patch_size, shortcut, g, e=1.0) for _ in range(n))
 
     def get_score(self):
         context_scores = []

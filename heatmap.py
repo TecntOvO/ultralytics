@@ -233,7 +233,7 @@ def get_params(folder_name):
     ]
     # 自定义需要绘制热力图的层索引，可以用列表绘制不同层的热力图,如[10, 12, 14, 16, 18]，将多层的话会将结果进行汇总到一张图上
     # layers = [15, 18, 21]
-    layers = [16, 20, 24]
+    layers = [15, 18, 21]
     for grad_name in grad_list:
         params = {
             'weight': 'runs/detect/'+folder_name+'/weights/best.pt',  # 训练好的权重路径
@@ -251,9 +251,9 @@ def get_params(folder_name):
 
 
 if __name__ == '__main__':
-    folder_name = "yolon+SEAM"
+    folder_name = "yolov+SIOU(640)+InnerIoU1.20+Attentionv2"
     for each in get_params(folder_name):
         model = yolov8_heatmap(**each)
         # model第一个参数：单张图片路径或者图片文件夹路径; 第二个参数：保存路径; 第三个参数：绘制热力图方法
         # model(r'images/00052.jpg', 'result', each['method'])
-        model(r'K:\Yolov8\work\MOT20-01\07\000001.jpg', 'runs/detect/'+folder_name+'/heatmap', each['method'])
+        model(r'D:\Yolov11\intense_detect\MOT20-01\07\000001.jpg', 'runs/detect/'+folder_name+'/heatmap', each['method'])

@@ -59,7 +59,8 @@ class FocalLoss(nn.Module):
         if alpha > 0:
             alpha_factor = label * alpha + (1 - label) * (1 - alpha)
             loss *= alpha_factor
-        return loss.mean(1).sum()
+        # return loss.mean(1).sum()
+        return loss
 
 
 class DFLoss(nn.Module):
@@ -100,12 +101,12 @@ class BboxLoss(nn.Module):
                 fg_mask, repgt_weight, repbox_weight):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
+        # iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
 
-        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=0.9)
+        iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=1.20, use_inner_iou=True)
         loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
-        if repgt_weight > 0:
-            loss_iou += RepGT_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], False) * repgt_weight
+        # if repgt_weight > 0:
+        #     loss_iou += RepGT_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], False) * repgt_weight
         # if repbox_weight > 0:
         #     loss_iou += RepBox_loss(pred_bboxes[fg_mask], False) * repbox_weight
 
@@ -171,6 +172,7 @@ class v8DetectionLoss:
 
         m = model.model[-1]  # Detect() module
         self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        self.fcl = FocalLoss()
         self.hyp = h
         self.stride = m.stride  # model strides
         self.nc = m.nc  # number of classes
@@ -252,6 +254,7 @@ class v8DetectionLoss:
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
         loss[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
+        # loss[1] = self.fcl(pred_scores, target_scores.to(dtype), alpha=0.75).sum() / target_scores_sum
 
         # Bbox loss
         if fg_mask.sum():
