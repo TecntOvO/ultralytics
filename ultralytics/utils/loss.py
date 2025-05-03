@@ -126,25 +126,33 @@ class BboxLoss(nn.Module):
 
     """Criterion class for computing training losses during training."""
 
-    def __init__(self, reg_max=16):
+    def __init__(self, reg_max=16, NWD_loss=False, IoU_ratio=0.5):
         """Initialize the BboxLoss module with regularization maximum and DFL settings."""
         super().__init__()
         self.dfl_loss = DFLoss(reg_max) if reg_max > 1 else None
+        assert 0.0 <= IoU_ratio <=1.0
+        self.nwd_loss = NWD_loss
+        self.iou_ratio = IoU_ratio
 
     def forward(self, pred_dist, pred_bboxes, anchor_points, target_bboxes, target_scores, small_target_scores,
                 target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask, repgt_weight=0, repbox_weight=0):
         """IoU loss."""
         weight_iou = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
+        # weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
 
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
-        small_iou = bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True)
+        # small_iou = bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True)
 
         # small_iou = bbox_inner_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True, ratio=0.70)
-        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True, ratio=0.80)
+        # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True)
 
         loss_iou = ((1.0 - iou) * weight_iou).sum() / target_scores_sum
-        loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
+        if self.nwd_loss:
+            nwd = wasserstein_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False)
+            nwd_loss = ((1.0 - nwd) * weight_iou).sum() / target_scores_sum
+            loss_iou = self.iou_ratio * loss_iou + (1 - self.iou_ratio) * nwd_loss
+
+        # loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
         # if repgt_weight > 0:
         #     loss_iou += RepGT_loss(pred_bboxes[fg_mask], target_bboxes[fg_mask], weight_iou,False) * repgt_weight
         # if repbox_weight > 0:
@@ -158,7 +166,7 @@ class BboxLoss(nn.Module):
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
-        return loss_iou, loss_dfl, loss_small_iou
+        return loss_iou, loss_dfl
 
 
 class BboxLoss_new(nn.Module):
@@ -182,8 +190,8 @@ class BboxLoss_new(nn.Module):
                 target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask):
         """IoU loss."""
         weight = target_scores.sum(-1)[fg_mask].unsqueeze(-1)
-        weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
-        small_iou = 0
+        # weight_small_iou = target_scores.sum(-1)[small_fg_mask].unsqueeze(-1)
+        # small_iou = 0
         if self.iou_type == "iou":
             iou = new_bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, Inner_iou=self.Inner_iou,
                                Focal=self.Focal, alpha=self.alpha, ratio=self.ratio)
@@ -212,8 +220,8 @@ class BboxLoss_new(nn.Module):
             # 仅针对正方形image输入
             iou = new_bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, MPDIoU=True,
                                Inner_iou=self.Inner_iou, ratio=self.ratio)
-            small_iou = new_bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, MPDIoU=True,
-                               Inner_iou=self.Inner_iou, ratio=self.ratio)
+            # small_iou = new_bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, MPDIoU=True,
+            #                    Inner_iou=self.Inner_iou, ratio=self.ratio)
         elif self.iou_type == "Shape-iou":
             iou = new_bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, ShapeIou=True,
                                Inner_iou=self.Inner_iou, ShapeIou_scale=0, ratio=self.ratio)
@@ -250,7 +258,7 @@ class BboxLoss_new(nn.Module):
                 iou = ((iou - d) / (u - d)).clamp(0, 1)
 
             loss_iou = ((1.0 - iou) * weight).sum() / target_scores_sum
-            loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
+            # loss_small_iou = ((1.0 - small_iou) * weight_small_iou).sum() / small_target_scores_sum
 
         # DFL loss
         if self.dfl_loss:
@@ -261,7 +269,7 @@ class BboxLoss_new(nn.Module):
         else:
             loss_dfl = torch.tensor(0.0).to(pred_dist.device)
 
-        return loss_iou, loss_dfl, loss_small_iou
+        return loss_iou, loss_dfl
 
 
 class RotatedBboxLoss(BboxLoss):
@@ -305,6 +313,46 @@ class KeypointLoss(nn.Module):
         return (kpt_loss_factor.view(-1, 1) * ((1 - torch.exp(-e)) * kpt_mask)).mean()
 
 
+def wasserstein_loss(box1, box2, eps=1e-7, constant=12.8, xywh=True):
+    r"""Implementation of paper `Enhancing Geometric Factors into
+    Model Learning and Inference for Object Detection and Instance
+    Segmentation <https://arxiv.org/abs/2005.03572>`_.
+    Code is modified from https://github.com/Zzh-tju/CIoU.
+    Args:
+        box1 (Tensor): Predicted bboxes of format (x_min, y_min, x_max, y_max),
+            shape (n, 4).
+        box2 (Tensor): Corresponding gt bboxes, shape (n, 4).
+        eps (float): Eps to avoid log(0).
+    Return:
+        Tensor: Loss tensor.
+    """
+
+    if xywh:  # transform from xywh to xyxy
+        (x1, y1, w1, h1), (x2, y2, w2, h2) = box1.chunk(4, -1), box2.chunk(4, -1)
+        w1_, h1_, w2_, h2_ = w1 / 2, h1 / 2, w2 / 2, h2 / 2
+        b1_x1, b1_x2, b1_y1, b1_y2 = x1 - w1_, x1 + w1_, y1 - h1_, y1 + h1_
+        b2_x1, b2_x2, b2_y1, b2_y2 = x2 - w2_, x2 + w2_, y2 - h2_, y2 + h2_
+    else:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1.chunk(4, -1)
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2.chunk(4, -1)
+        w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1 + eps
+        w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1 + eps
+
+    # 计算框的中心坐标
+    b1_x_center, b1_y_center = (b1_x1 + b1_x2) / 2, (b1_y1 + b1_y2) / 2
+    b2_x_center, b2_y_center = (b2_x1 + b2_x2) / 2, (b2_y1 + b2_y2) / 2
+
+    # 计算中心距离和宽高距离
+    center_distance = (b1_x_center - b2_x_center).pow(2) + (b1_y_center - b2_y_center).pow(2) + eps
+    wh_distance = ((w1 - w2).pow(2) + (h1 - h2).pow(2)) / 4
+
+    # Wasserstein 距离
+    wasserstein_2 = center_distance + wh_distance
+
+    # 返回损失
+    return torch.exp(-torch.sqrt(wasserstein_2) / constant)
+
+
 class v8DetectionLoss:
     """Criterion class for computing training losses."""
 
@@ -327,9 +375,9 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        self.bbox_loss = BboxLoss(m.reg_max).to(device)
-        # self.bbox_loss = BboxLoss_new(m.reg_max, self.hyp.imgsz, self.hyp.iou_type, self.hyp.Inner_iou, self.hyp.Focal,
-        #                           self.hyp.Focaler, self.hyp.epochs, self.hyp.alpha, self.hyp.ratio).to(device)
+        # self.bbox_loss = BboxLoss(m.reg_max, self.hyp.NWD_loss, self.hyp.IoU_ratio).to(device)
+        self.bbox_loss = BboxLoss_new(m.reg_max, self.hyp.imgsz, self.hyp.iou_type, self.hyp.Inner_iou, self.hyp.Focal,
+                                  self.hyp.Focaler, self.hyp.epochs, self.hyp.alpha, self.hyp.ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):
@@ -375,7 +423,7 @@ class v8DetectionLoss:
 
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
-        loss_total = torch.zeros(4, device=self.device)  # box, cls, dfl, smallbox
+        loss_total = torch.zeros(3, device=self.device)  # box, cls, dfl
 
         # 将多尺度特征图 feats 的预测结果拆分为 pred_distri（边界框分布）和 pred_scores（类别分数）
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -446,9 +494,15 @@ class v8DetectionLoss:
 
 
         # Bbox loss
+        # if fg_mask.sum():
+        #     target_bboxes /= stride_tensor
+        #     loss_total[0], loss_total[2], loss_total[3] = self.bbox_loss(
+        #         pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, small_target_scores,
+        #         target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask
+        #     )
         if fg_mask.sum():
             target_bboxes /= stride_tensor
-            loss_total[0], loss_total[2], loss_total[3] = self.bbox_loss(
+            loss_total[0], loss_total[2]= self.bbox_loss(
                 pred_distri, pred_bboxes, anchor_points, target_bboxes, target_scores, small_target_scores,
                 target_scores_sum, small_target_scores_sum, fg_mask, small_fg_mask
             )
@@ -456,9 +510,9 @@ class v8DetectionLoss:
         loss_total[0] *= self.hyp.box  # box gain
         loss_total[1] *= self.hyp.cls  # cls gain
         loss_total[2] *= self.hyp.dfl  # dfl gain
-        loss_total[3] *= self.hyp.box  # box gain
+        # loss_total[3] *= self.hyp.box  # box gain
 
-        return loss_total[:3].sum() * batch_size, loss_total.detach()  # loss(box, cls, dfl, smallbox)
+        return loss_total.sum() * batch_size, loss_total.detach()  # loss(box, cls, dfl)
 
 
 class v8SegmentationLoss(v8DetectionLoss):

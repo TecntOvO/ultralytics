@@ -380,12 +380,6 @@ class Model(nn.Module):
         self.model.load(weights, mask=mask)
         return self
 
-    def load_(self, weights: Union[str, Path] = "yolo11n.pt") -> "Model":
-        from ultralytics.nn.tasks import torch_safe_load
-        self._check_is_pytorch_model()
-        ckpt, _ = torch_safe_load(weights)
-        self.model.load_(ckpt)
-
     def save(self, filename: Union[str, Path] = "saved_model.pt") -> None:
         """
         Saves the current model state to a file.

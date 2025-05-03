@@ -36,7 +36,7 @@ def get_inner_iou(box1, box2, xywh=True, eps=1e-7, ratio=0.7):
 
 
 def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EIoU=False, SIoU=False, eps=1e-7,
-                   ratio=0.7):
+                   use_inner_iou=False, ratio=0.7):
     """
     Calculate Intersection over Union (IoU) of box1(1, 4) to box2(n, 4).
     Args:
@@ -89,13 +89,19 @@ def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EI
                 v = (4 / math.pi**2) * ((w2 / h2).atan() - (w1 / h1).atan()).pow(2)
                 with torch.no_grad():
                     alpha = v / (v - iou + (1 + eps))
-                return inner_iou - (rho2 / c2 + v * alpha)  # inner-CIoU
+                if use_inner_iou:
+                    return inner_iou - (rho2 / c2 + v * alpha)  # inner-CIoU
+                else:
+                    return iou - (rho2 / c2 + v * alpha)
             elif EIoU:
                 rho_w2 = ((b2_x2 - b2_x1) - (b1_x2 - b1_x1)) ** 2
                 rho_h2 = ((b2_y2 - b2_y1) - (b1_y2 - b1_y1)) ** 2
                 cw2 = cw ** 2 + eps
                 ch2 = ch ** 2 + eps
-                return inner_iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)     # inner-EIoU
+                if use_inner_iou:
+                    return inner_iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)     # inner-EIoU
+                else:
+                    return iou - (rho2 / c2 + rho_w2 / cw2 + rho_h2 / ch2)
             elif SIoU:
                 # SIoU Loss https://arxiv.org/pdf/2205.12740.pdf
                 # angle loss
@@ -118,7 +124,10 @@ def bbox_inner_iou(box1, box2, xywh=True, GIoU=False, DIoU=False, CIoU=False, EI
                 omiga_w = torch.abs(w1 - w2) / torch.max(w1, w2)
                 omiga_h = torch.abs(h1 - h2) / torch.max(h1, h2)
                 shape_cost = torch.pow(1 - torch.exp(-1 * omiga_w), 4) + torch.pow(1 - torch.exp(-1 * omiga_h), 4)
-                return inner_iou - 0.5 * (distance_cost + shape_cost) + eps  # inner-SIoU
+                if use_inner_iou:
+                    return inner_iou - 0.5 * (distance_cost + shape_cost) + eps  # inner-SIoU
+                else:
+                    return iou - 0.5 * (distance_cost + shape_cost) + eps
             return inner_iou - rho2 / c2  # inner-DIoU
         c_area = cw * ch + eps  # convex area
         return inner_iou - (c_area - union) / c_area  # inner-GIoU https://arxiv.org/pdf/1902.09630.pdf

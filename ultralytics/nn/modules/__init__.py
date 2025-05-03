@@ -71,8 +71,13 @@ from .block import (
     C2f_attention,
     C2fA,
     SPD,
+    C2CBAM,
+    C2fA2,
+    C3k2A,
+    C3k2A2,
+    CARAFE,
     CBAMLayer,
-    C2CBAM
+    VoVGSCSP
 )
 from .conv import (
     CBAM,
@@ -90,7 +95,9 @@ from .conv import (
     SpatialAttention,
     WeightedConcat,
     DualConv,
-    GSConv
+    GSConv,
+    SPDConv,
+
 )
 from .head import OBB, Classify, Detect, Pose, RTDETRDecoder, Segment, WorldDetect, v10Detect, SEAM_Detect, CBAM_Detect
 from .transformer import (

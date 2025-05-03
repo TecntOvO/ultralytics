@@ -3,16 +3,17 @@ import os
 
 if __name__ == '__main__':
     os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
-    model = YOLO(r"yolo11-move_learn.yaml")
-    # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
+    model = YOLO(r"yolo11-compare2.yaml")
+    mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
     # mask = {13: 11, 16: 14, 17: 15, 19: 17, 23: 18}
     # mask = {16: 9, 17: 10, 19: 12, 23: 13}
-    model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A\weights\last.pt")
+    model.load(r"yolo11n.pt", mask)
+    # model.load(r"")
     model.train(
         data="straberry_final_enhance.yaml",
-        epochs=100,  # number of training epochs
+        epochs=150,  # number of training epochs
         cfg='ours.yaml',
-        lr0=0.0003,
+        lr0=0.0007,
         lrf=0.01,
         rect=True,
         batch=32,
@@ -26,6 +27,8 @@ if __name__ == '__main__':
         Inner_iou=False,
         ratio=0.85,
         workers=8,
+        NWD_loss=True,
+        IoU_ratio=0.5,
         # freeze=[0,1,2,3,4,5,6,7,8]
         # warmup_epochs=0.0,
     )

@@ -79,12 +79,19 @@ from ultralytics.nn.modules import (
     C2fA,
     SPD,
     SEAM_Detect,
-    CBAMLayer,
+    CBAM,
     CBAM_Detect,
     C2CBAM,
     GSConv,
     MConv2d,
-    UIB
+    UIB,
+    SPDConv,
+    C2fA2,
+    C3k2A,
+    C3k2A2,
+    CARAFE,
+    CBAMLayer,
+    VoVGSCSP
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -179,11 +186,12 @@ class BaseModel(nn.Module):
                 x = y[m.f] if isinstance(m.f, int) else [x if j == -1 else y[j] for j in m.f]  # from earlier layers
             if profile:
                 self._profile_one_layer(m, x, dt)
-            if m.type in score_module and score_visualize and x.shape[0] == 1:
+            if score_visualize:
                 with profilers[0]:
                     x = m(x)
                 with profilers[1]:
-                    scores.append(m.get_score())
+                    if "get_score" in dir(m):
+                        scores.append(m.get_score())
                 LOGGER.info(f"--Inference: {profilers[0].dt * 1e3}ms, Get_Score: {profilers[1].dt * 1e3}ms--")
             else:
                 x = m(x)
@@ -325,7 +333,13 @@ class BaseModel(nn.Module):
                 if result and len(result.regs) == 1:
                     level = int(result.group())
                     new_level = mask.get(level, "No")
-                    if new_level != "No":
+                    if new_level == -1 :
+                        new_key = "Desert_Block"
+                    elif new_level == -2 :
+                        csd_mapping.clear()
+                        csd_mapping[name] = weight
+                        break
+                    elif new_level != "No":
                         new_name = name[:result.regs[0][0]] + str(new_level) + name[result.regs[0][1]:]
                         # check name existence and weight shape match
                         self_weight = self.state_dict().get(new_name, None)
@@ -1072,15 +1086,18 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             PSA,
             SCDown,
             C2fCIB,
-            MultiSEAM,
             C2MVIT,
             C2f_attention,
             DualConv,
             C2fA,
-            CBAMLayer,
             C2CBAM,
             GSConv,
-            MConv2d
+            MConv2d,
+            SPDConv,
+            C2fA2,
+            C3k2A,
+            C3k2A2,
+            VoVGSCSP
         }:
             c1, c2 = ch[f], args[0]
             if c2 != nc:  # if c2 not equal to number of classes (i.e. for Classify() output)
@@ -1107,7 +1124,11 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fCIB,
                 C2PSA,
                 C2fA,
-                C2CBAM
+                C2CBAM,
+                C2fA2,
+                C3k2A,
+                C3k2A2,
+                VoVGSCSP
             }:
                 args.insert(2, n)  # number of repeats
                 n = 1
@@ -1170,6 +1191,15 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             c1, c2 = ch[f], args[0]
             c2 = make_divisible(min(c2, max_channels) * width, divisor=8)
             args = [c1, c2, *args[1:]]
+        elif m is CARAFE:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m is CBAMLayer:
+            c2 = ch[f]
+            args = [c2, *args]
+        elif m is MultiSEAM:
+            c2 = ch[f]
+            args = [c2, *args]
         else:
             c2 = ch[f]
 

@@ -1,0 +1,9 @@
+path: D:\Yolov11\datasets\split_final # dataset root dir
+train: images/train
+val: images/val
+
+# Classes
+names:
+  0: ripe
+  1: unripe
+  2: flower

@@ -144,6 +144,14 @@ class Focus(nn.Module):
         """Initializes Focus object with user defined channel, convolution, padding, group and activation values."""
         super().__init__()
         self.conv = Conv(c1 * 4, c2, k, s, p, g, act=act)
+        # self.conv = nn.Sequential(
+        #     nn.Conv2d(c1 * 4, c1 * 4, k, s, autopad(k,p), groups=c1 * 4),
+        #     nn.BatchNorm2d(c1 * 4),
+        #     nn.SiLU(),
+        #     nn.Conv2d(c1 * 4, c2, 1, 1, 0),
+        #     nn.BatchNorm2d(c2),
+        #     nn.SiLU()
+        # )
         # self.contract = Contract(gain=2)
 
     def forward(self, x):
@@ -346,6 +354,22 @@ class WeightedConcat(nn.Module):
         self.epsilon = epsilon
 
     def forward(self, x):
+        w = self.weights
+        w = w / (torch.sum(w, dim=0) + self.epsilon)
+        return torch.cat([w_ * x_ for w_, x_ in zip(w, x)], self.d)
+
+class CAConcat(nn.Module):
+    """Concatenate a list of tensors along dimension with weights."""
+
+    def __init__(self, features_num, dimension=1, epsilon=1e-7):
+        """Concatenates a list of tensors along a specified dimension with weights."""
+        super().__init__()
+        self.features_num = features_num
+        self.d = dimension
+        self.weights = nn.Parameter(torch.ones(features_num, dtype=torch.float32), requires_grad=True)
+        self.epsilon = epsilon
+
+    def forward(self, x):
         assert len(x) == self.features_num
         w = F.relu(self.weights, False)
         w = w / (torch.sum(w, dim=0) / self.features_num + self.epsilon)
@@ -354,6 +378,7 @@ class WeightedConcat(nn.Module):
         #     concat_list.append(w[i] * x_)
         # return torch.cat(concat_list, self.d)
         return torch.cat([w_ * x_ for w_, x_ in zip(w, x)], self.d)
+
 
 class DualConv(nn.Module):
 
@@ -401,3 +426,17 @@ class GSConv(nn.Module):
         # [2,B*N/2,H*W] -> [2,B,N//2,H,W]
         y = y.reshape(2, -1, n // 2, h, w)
         return torch.cat((y[0], y[1]), 1)
+
+class SPDConv(nn.Module):
+    """Standard convolution with args(ch_in, ch_out, kernel, stride, padding, groups, dilation, activation)."""
+    def __init__(self, c1, c2, k=1, s=1, p=None, g=1, d=1, act=True):
+        """Initialize Conv layer with given arguments including activation."""
+        super().__init__()
+        self.conv = nn.Conv2d(4 * c1, c2, k, s, autopad(k, p, d), groups=g, dilation=d, bias=False)
+        self.bn = nn.BatchNorm2d(c2)
+        self.act = nn.SiLU()
+
+    def forward(self, x):
+        """Apply convolution, batch normalization and activation to input tensor."""
+        x = torch.cat([x[..., ::2, ::2], x[..., 1::2, ::2], x[..., ::2, 1::2], x[..., 1::2, 1::2]], 1)
+        return self.act(self.bn(self.conv(x)))

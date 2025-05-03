@@ -24,10 +24,10 @@ backbone:
 head:
   - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-  - [-1, 2, C3k2, [64, False]] # 11
+  - [-1, 2, C2fA, [64, 4, 2]] # 11
 
   - [-1, 1, Conv, [64, 3, 2]]
   - [[-1, 8], 1, Concat, [1]] # cat backbone P4
-  - [-1, 2, C3k2, [128, False]] # 14 (P4/16-large)
+  - [-1, 2, C2fA, [128, 2, 2]] # 14 (P4/16-large)
 
   - [[11, 14], 1, Detect, [nc]] # Detect(P3, P4, P5)
