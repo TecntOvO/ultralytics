@@ -77,7 +77,8 @@ from .block import (
     C3k2A2,
     CARAFE,
     CBAMLayer,
-    VoVGSCSP
+    VoVGSCSP,
+    C3k2A3
 )
 from .conv import (
     CBAM,

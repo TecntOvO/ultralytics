@@ -7,6 +7,7 @@ if __name__ == '__main__':
     # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
     mask = {13: 11, 16: 14, 17: 15, 19: 17, 23: 18}
     # mask = {16: 9, 17: 10, 19: 12, 23: 13}
+    # mask = {16: 9, 17: 13, 19: 15, 23: 16}
     # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A + VoV\weights\best.pt")
     model.load(r"yolo11n.pt", mask)
 

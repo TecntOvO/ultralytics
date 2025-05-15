@@ -1,0 +1,9 @@
+path: D:\Yolov11\datasets\for test # dataset root dir
+train:
+val: images/val
+
+# Classes
+names:
+  0: ripe
+  1: unripe
+  2: flower

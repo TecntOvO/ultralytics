@@ -375,9 +375,9 @@ class v8DetectionLoss:
         self.use_dfl = m.reg_max > 1
 
         self.assigner = TaskAlignedAssigner(topk=tal_topk, num_classes=self.nc, alpha=0.5, beta=6.0)
-        # self.bbox_loss = BboxLoss(m.reg_max, self.hyp.NWD_loss, self.hyp.IoU_ratio).to(device)
-        self.bbox_loss = BboxLoss_new(m.reg_max, self.hyp.imgsz, self.hyp.iou_type, self.hyp.Inner_iou, self.hyp.Focal,
-                                  self.hyp.Focaler, self.hyp.epochs, self.hyp.alpha, self.hyp.ratio).to(device)
+        self.bbox_loss = BboxLoss(m.reg_max, self.hyp.NWD_loss, self.hyp.IoU_ratio).to(device)
+        # self.bbox_loss = BboxLoss_new(m.reg_max, self.hyp.imgsz, self.hyp.iou_type, self.hyp.Inner_iou, self.hyp.Focal,
+        #                           self.hyp.Focaler, self.hyp.epochs, self.hyp.alpha, self.hyp.ratio).to(device)
         self.proj = torch.arange(m.reg_max, dtype=torch.float, device=device)
 
     def preprocess(self, targets, batch_size, scale_tensor):

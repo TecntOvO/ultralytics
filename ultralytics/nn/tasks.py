@@ -91,7 +91,8 @@ from ultralytics.nn.modules import (
     C3k2A2,
     CARAFE,
     CBAMLayer,
-    VoVGSCSP
+    VoVGSCSP,
+    C3k2A3
 )
 from ultralytics.utils import DEFAULT_CFG_DICT, DEFAULT_CFG_KEYS, LOGGER, colorstr, emojis, yaml_load
 from ultralytics.utils.checks import check_requirements, check_suffix, check_yaml
@@ -1097,6 +1098,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
             C2fA2,
             C3k2A,
             C3k2A2,
+            C3k2A3,
             VoVGSCSP
         }:
             c1, c2 = ch[f], args[0]
@@ -1128,6 +1130,7 @@ def parse_model(d, ch, verbose=True):  # model_dict, input_channels(3)
                 C2fA2,
                 C3k2A,
                 C3k2A2,
+                C3k2A3,
                 VoVGSCSP
             }:
                 args.insert(2, n)  # number of repeats

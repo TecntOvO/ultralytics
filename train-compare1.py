@@ -3,11 +3,12 @@ import os
 
 if __name__ == '__main__':
     os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
-    model = YOLO(r"yolo11-compare2.yaml")
-    mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
+    # model = YOLO(r"yolo11-compare1.yaml")
+    model = YOLO(r"yolo11m.yaml")
+    # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21, 6:-1, 8:-1}
     # mask = {13: 11, 16: 14, 17: 15, 19: 17, 23: 18}
     # mask = {16: 9, 17: 10, 19: 12, 23: 13}
-    model.load(r"yolo11n.pt", mask)
+    # model.load(r"yolo11n.pt", mask)
     # model.load(r"")
     model.train(
         data="straberry_final_enhance.yaml",

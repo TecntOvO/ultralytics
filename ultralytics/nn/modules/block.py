@@ -2461,6 +2461,35 @@ class C3k2A2(nn.Module):
         y.extend(m(y[-1]) for m in self.m)
         return self.attn(self.cv2(torch.cat(y, 1)))
 
+class C3k2A3(nn.Module):
+    def __init__(self, c1, c2, n=1, attn=False, d=1, ps=2, e=0.5, g=1, shortcut=True):
+        """Initializes a CSP bottleneck with 2 convolutions and n Bottleneck blocks for faster processing."""
+        super().__init__()
+        c_ = int(c2 * e)  # hidden channels
+        self.cv1 = Conv(c1, 2 * c_, 1, 1)
+        self.cv2 = Conv((2 + n) * c_, c2, 1)  # optional act=FReLU(c2)
+        self.m = nn.ModuleList(
+            MobileViTBlockv2(c_ // 2, d, c_, c_, ps)
+            if attn
+            else C3k(c_, c_, 2, shortcut, g)
+            for _ in range(n)
+        )
+        self.attn = attn
+
+    def forward(self, x):
+        y = list(self.cv1(x).chunk(2, 1))
+        y.extend(m(y[-1]) for m in self.m)
+        y = self.cv2(torch.cat(y, 1))
+        return y
+
+    def get_score(self):
+        context_scores = []
+        for block in self.m:
+            if str(type(block)) == "<class 'ultralytics.nn.modules.block.MobileViTBlockv2'>":
+                block_scores = block.get_score()
+                context_scores.extend(block_scores)
+        return tuple(context_scores)
+
 
 class C2f_attention(C2f):
     def __init__(self, c1, c2, depth=1, patch_size=2, e=0.5, g=1, shortcut=True):
