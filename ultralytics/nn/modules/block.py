@@ -1726,7 +1726,7 @@ class C2f(nn.Module):
 class VoVGSCSP(nn.Module):
     def __init__(self, c1, c2, n=1, e=0.5):
         super().__init__()
-        # c_ = int(c2 * e)
+        c_ = int(c2 * e)
         # self.cv1 = Conv(c1, c_, 1, 1)
         # self.cv2 = Conv(2 * c_, c2, 1)
         # self.m = nn.Sequential(*(GSBottleneck(c_, c_, 1.0) for _ in range(n)))
@@ -1738,8 +1738,8 @@ class VoVGSCSP(nn.Module):
 
         # self.cv1 = Conv(c1, c_, 1, 1)
         # self.cv2 = Conv(c1, c_, 1, 1)
-        # self.gsb = nn.Sequential(*(GSBottleneck(c_, c_, e=1.0) for _ in range(n)))
-        # self.cv3 = Conv(2 * c_, c2, 1)
+        # self.gsb = nn.ModuleList(GSBottleneck(c_, c_, e=0.5) for _ in range(n))
+        # self.cv3 = Conv((2 + n) * c_, c2, 1)
     def forward(self, x):
         # x1 = self.cv1(x)
         # return self.cv2(torch.cat((self.m(x1), x1), dim=1))
@@ -1751,6 +1751,10 @@ class VoVGSCSP(nn.Module):
         # x1 = self.gsb(self.cv1(x))
         # y = self.cv2(x)
         # return self.cv3(torch.cat((y, x1), dim=1))
+
+        # y = list((self.cv1(x),self.cv2(x)))
+        # y.extend(m(y[-1]) for m in self.gsb)
+        # return self.cv3(torch.cat(y, dim=1))
 
 class GSBottleneck(nn.Module):
     # GS Bottleneck https://github.com/AlanLi1997/slim-neck-by-gsconv
