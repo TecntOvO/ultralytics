@@ -143,6 +143,7 @@ class BboxLoss(nn.Module):
         iou = bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, CIoU=True)
         # small_iou = bbox_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True)
 
+        # iou = new_bbox_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, PIouV1=True)
         # small_iou = bbox_inner_iou(pred_bboxes[small_fg_mask], target_bboxes[small_fg_mask], xywh=False, CIoU=True, ratio=0.70)
         # iou = bbox_inner_iou(pred_bboxes[fg_mask], target_bboxes[fg_mask], xywh=False, SIoU=True)
 

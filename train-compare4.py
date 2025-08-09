@@ -3,16 +3,18 @@ import os
 
 if __name__ == '__main__':
     os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
-    # model = YOLO(r"yolo11-compare1.yaml")
-    model = YOLO(r"yolo11s.pt")
-    # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21, 6:-1, 8:-1}
-    # mask = {13: 11, 16: 14, 17: 15, 19: 17, 23: 18}
+    model = YOLO(r"yolo11-compare4.yaml")
+    # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
+    mask = {16: 9, 17: 16, 19: 18, 23: 19}
     # mask = {16: 9, 17: 10, 19: 12, 23: 13}
-    # model.load(r"yolo11n.pt", mask)
-    # model.load(r"")
+    # mask = {16: 9, 17: 13, 19: 15, 23: 16}
+    # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A + VoV\weights\best.pt")
+    model.load(r"yolo11n.pt", mask)
+
+    # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A  2\weights\best.pt")
     model.train(
-        data="straberry_final_enhance.yaml",
-        epochs=150,  # number of training epochs
+        data="straberry_final_enhance_balance.yaml",
+        epochs=150,  # number of train ing epochs
         cfg='ours.yaml',
         lr0=0.0007,
         lrf=0.01,
@@ -24,13 +26,11 @@ if __name__ == '__main__':
         weight_decay=0.0007,
         patience=50,
         val_coco=r"D:\Yolov11\datasets\split_whole_enhance_8-2_new\instances_val2017.json",
-        iou_type='MPDiou',
+        iou_type='Wise-iou',
         Inner_iou=False,
         ratio=0.85,
         workers=8,
-        NWD_loss=True,
-        IoU_ratio=0.5,
-        # freeze=[0,1,2,3,4,5,6,7,8]
+        freeze=[0,1,2,3,4,5,6],
         # warmup_epochs=0.0,
     )
 

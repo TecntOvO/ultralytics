@@ -1,4 +1,4 @@
-path: D:\Yolov11\datasets\split_final # dataset root dir
+path: D:\Yolov11\datasets\split_final_8-7 # dataset root dir
 train: images/train
 val: images/val
 
