@@ -277,9 +277,12 @@ class BaseValidator:
                 matches = np.array(matches).T
                 if matches.shape[0]:
                     if matches.shape[0] > 1:
+                        # 对于超过阈值的iou的下标按照其大小从大到小排序
                         matches = matches[iou[matches[:, 0], matches[:, 1]].argsort()[::-1]]
+                        # 确保不会有一个预测框被分配到两个及以上真实框上，若有根据上一步骤可知保留iou最大的一个
                         matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
                         # matches = matches[matches[:, 2].argsort()[::-1]]
+                        # 然后保证一个真实框会对应多个预测框
                         matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
                     if threshold == 0.5:
                         IoU_for_mean = iou[matches[:, 0], matches[:, 1]].sum()

@@ -622,12 +622,15 @@ class ConfusionMatrix:
         m0, m1, _ = matches.transpose().astype(int)
         for i, gc in enumerate(gt_classes):
             j = m0 == i
+            # 如果有真实框匹配到了一个预测框，那么就在混淆矩阵行为预测框类别，列为真实框类别的位置+1
             if n and sum(j) == 1:
                 self.matrix[detection_classes[m1[j]], gc] += 1  # correct
+            # 否则说明没有预测框匹配到了真实框，说明漏检，即预测为背景
             else:
                 self.matrix[self.nc, gc] += 1  # true background
 
         if n:
+            # 如果预测框并没有真实框与其对应，那么认为是把背景检测为目标了（置信度足够高）
             for i, dc in enumerate(detection_classes):
                 if not any(m1 == i):
                     self.matrix[dc, self.nc] += 1  # predicted background

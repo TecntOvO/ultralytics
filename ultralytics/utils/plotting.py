@@ -333,7 +333,7 @@ class Annotator:
             lineType=cv2.LINE_AA,
         )
 
-    def box_label(self, box, label="", color=(128, 128, 128), txt_color=(255, 255, 255), rotated=False):
+    def box_label(self, box, label="", color=(128, 128, 128), txt_color=(255, 255, 255), rotated=False, bottom=False):
         """
         Draws a bounding box to image with label.
 
@@ -345,6 +345,7 @@ class Annotator:
             rotated (bool, optional): Variable used to check if task is OBB
         """
         txt_color = self.get_txt_color(color, txt_color)
+        box_height = int(box[3] - box[1])
         if isinstance(box, torch.Tensor):
             box = box.tolist()
         if self.pil or not is_ascii(label):
@@ -357,6 +358,7 @@ class Annotator:
             if label:
                 w, h = self.font.getsize(label)  # text width, height
                 outside = p1[1] >= h  # label fits outside box
+                p1 = (box[0], box[1] + (box_height if bottom else 0))
                 if p1[0] > self.im.size[0] - w:  # size is (w, h), check if label extend beyond right side of image
                     p1 = self.im.size[0] - w, p1[1]
                 self.draw.rectangle(
@@ -376,6 +378,7 @@ class Annotator:
                 w, h = cv2.getTextSize(label, 0, fontScale=self.sf, thickness=self.tf)[0]  # text width, height
                 h += 3  # add pixels to pad text
                 outside = p1[1] >= h  # label fits outside box
+                p1 = (int(box[0]), int(box[1]) + (box_height if bottom else 0))
                 if p1[0] > self.im.shape[1] - w:  # shape is (h, w), check if label extend beyond right side of image
                     p1 = self.im.shape[1] - w, p1[1]
                 p2 = p1[0] + w, p1[1] - h if outside else p1[1] + h
