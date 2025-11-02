@@ -3,16 +3,19 @@
 import os
 from pathlib import Path
 
+import cv2
 import numpy as np
 import torch
+from torch import Tensor
 
 from ultralytics.data import build_dataloader, build_yolo_dataset, converter
 from ultralytics.engine.validator import BaseValidator
 from ultralytics.utils import LOGGER, ops
 from ultralytics.utils.checks import check_requirements
 from ultralytics.utils.metrics import ConfusionMatrix, DetMetrics, box_iou
-from ultralytics.utils.plotting import output_to_target, plot_images
+from ultralytics.utils.plotting import output_to_target, plot_images, Annotator, Colors
 
+colors = Colors()
 
 class DetectionValidator(BaseValidator):
     """
@@ -46,6 +49,8 @@ class DetectionValidator(BaseValidator):
                 "WARNING ⚠️ 'save_hybrid=True' will append ground truth to predictions for autolabelling.\n"
                 "WARNING ⚠️ 'save_hybrid=True' will cause incorrect mAP.\n"
             )
+        if self.args.export_wrong:
+            (self.save_dir / "predict_wrong").mkdir(parents=True, exist_ok=True)
 
     def preprocess(self, batch):
         """Preprocesses batch of images for YOLO training."""
@@ -154,11 +159,14 @@ class DetectionValidator(BaseValidator):
 
             # Evaluate
             if nl:
+                # 返回的矩阵每列表示一个iou阈值下被真实框匹配的预测框（True为匹配）
                 stat["tp"], IoU_for_mean, match_num = self._process_batch(predn, bbox, cls)
                 self.mIoU += IoU_for_mean
                 self.boxes_num += match_num
             if self.args.plots:
                 self.confusion_matrix.process_batch(predn, bbox, cls)
+            if self.args.export_wrong:
+                self.get_predict_wrong(predn, bbox, cls, pbatch['ori_shape'], pbatch['imgsz'], batch['im_file'][si], Path(batch['im_file'][si]).stem, pbatch["ratio_pad"])
             for k in self.stats.keys():
                 self.stats[k].append(stat[k])
 
@@ -172,6 +180,50 @@ class DetectionValidator(BaseValidator):
                     pbatch["ori_shape"],
                     self.save_dir / "labels" / f'{Path(batch["im_file"][si]).stem}.txt',
                 )
+
+    def get_predict_wrong(self, detections, gt_bboxes, gt_cls, ori_size, img_size, img_path, imgname, ratio_pad):
+        if gt_cls.shape[0] == 0 or detections is None:
+            return
+        detections = detections[detections[:, 4] > self.args.conf]
+        gt_classes = gt_cls.cpu().int().numpy()
+        detection_classes = detections[:, 5].cpu().int().numpy()
+        detection_bboxes = detections[:, :4]
+        detection_conf = detections[:, 4].cpu().numpy()
+        is_obb = detections.shape[1] == 7 and gt_bboxes.shape[1] == 5  # with additional `angle` dimension
+        if is_obb:
+            return
+        iou = box_iou(gt_bboxes, detection_bboxes)
+        x = torch.where(iou > 0.45)
+        if x[0].shape[0]:
+            matches = torch.cat((torch.stack(x, 1), iou[x[0], x[1]][:, None]), 1).cpu().numpy()
+            if x[0].shape[0] > 1:
+                matches = matches[matches[:, 2].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 1], return_index=True)[1]]
+                matches = matches[matches[:, 2].argsort()[::-1]]
+                matches = matches[np.unique(matches[:, 0], return_index=True)[1]]
+        else:
+            return
+        m0, m1, _ = matches.transpose().astype(int)
+
+        img_ = cv2.imread(img_path)
+        cv2.cvtColor(img_, cv2.COLOR_BGR2RGB, img_)
+        fs = int((img_.shape[0] + img_.shape[1]) * 0.01)
+        annotator = Annotator(img_, line_width=round(fs / 10), font_size=fs, pil=True, example=self.names)
+        exist = False
+        for i, m in enumerate(m0):
+            # IoU 阈值够高但是分类错误
+            if gt_classes[m] != detection_classes[m1[i]]:
+                exist = True
+                true_box, true_class = gt_bboxes[m].cpu().numpy().astype(np.int64).tolist(), gt_classes[m].astype("int")
+                pred_box, pred_class, pred_conf = detection_bboxes[m1[i]].cpu().numpy().astype(np.int64).tolist(), detection_classes[m1[i]].astype("int"), detection_conf[m1[i]].astype("float")
+                true_color = colors(true_class)
+                true_class = self.names.get(true_class, true_class)
+                pred_color = colors(pred_class)
+                pred_class = self.names.get(pred_class, pred_class)
+                annotator.box_label(true_box, f"True:{true_class}", color=true_color, rotated=False, bottom=True)
+                annotator.box_label(pred_box, f"Pred:{pred_class} {pred_conf*100:.1f}%", color=pred_color, rotated=False)
+        if exist:
+            annotator.im.save(self.save_dir / "predict_wrong" / f"{imgname}.jpg")
 
     def finalize_metrics(self, *args, **kwargs):
         """Set final values for metrics speed and confusion matrix."""
