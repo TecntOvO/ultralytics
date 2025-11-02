@@ -1731,15 +1731,15 @@ class VoVGSCSP(nn.Module):
         # self.cv2 = Conv(2 * c_, c2, 1)
         # self.m = nn.Sequential(*(GSBottleneck(c_, c_, 1.0) for _ in range(n)))
 
-        self.c = int(c2 * e)  # hidden channels
-        self.cv1 = Conv(c1, 2 * self.c, 1, 1)
-        self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
-        self.m = nn.ModuleList(GSBottleneck(self.c, self.c, 0.5) for _ in range(n))
+        # self.c = int(c2 * e)  # hidden channels
+        # self.cv1 = Conv(c1, 2 * self.c, 1, 1)
+        # self.cv2 = Conv((2 + n) * self.c, c2, 1)  # optional act=FReLU(c2)
+        # self.m = nn.ModuleList(GSBottleneck(self.c, self.c, 0.5) for _ in range(n))
 
-        # self.cv1 = Conv(c1, c_, 1, 1)
-        # self.cv2 = Conv(c1, c_, 1, 1)
-        # self.gsb = nn.ModuleList(GSBottleneck(c_, c_, e=0.5) for _ in range(n))
-        # self.cv3 = Conv((2 + n) * c_, c2, 1)
+        self.cv1 = Conv(c1, c_, 1, 1)
+        self.cv2 = Conv(c1, c_, 1, 1)
+        self.m = nn.ModuleList(GSBottleneck(c_, c_, e=0.5) for _ in range(n))
+        self.cv3 = Conv((2 + n) * c_, c2, 1)
 
         # self.cv1 = Conv(c1, c_, 1, 1)
         # self.cv2 = Conv(c1, c_, 1, 1)
@@ -1755,9 +1755,9 @@ class VoVGSCSP(nn.Module):
         # x1 = self.cv1(x)
         # return self.cv2(torch.cat((self.m(x1), x1), dim=1))
 
-        y = list(self.cv1(x).chunk(2, 1))
+        y = list((self.cv1(x), self.cv2(x)))
         y.extend(m(y[-1]) for m in self.m)
-        return self.cv2(torch.cat(y, 1))
+        return self.cv3(torch.cat(y, 1))
 
         # x1 = self.gsb(self.cv1(x))
         # y = self.cv2(x)

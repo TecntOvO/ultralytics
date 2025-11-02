@@ -13,7 +13,7 @@ if __name__ == '__main__':
 
     # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A  2\weights\best.pt")
     model.train(
-        data="straberry_final_enhance_balance.yaml",
+        data="straberry_final_enhance.yaml",
         epochs=150,  # number of train ing epochs
         cfg='ours.yaml',
         lr0=0.0007,

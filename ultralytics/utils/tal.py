@@ -153,11 +153,11 @@ class TaskAlignedAssigner(nn.Module):
         return small_fg_mask
     def get_pos_mask(self, pd_scores, pd_bboxes, gt_labels, gt_bboxes, anc_points, mask_gt):
         """Get in_gts mask, (b, max_num_obj, h*w)."""
-        # 筛选位于真实框内的锚点
+        # 筛选位于真实框内的锚点, 对于不在真实框内的锚点，其对应的target的分数为0
         mask_in_gts = self.select_candidates_in_gts(anc_points, gt_bboxes)
         # Get anchor_align metric, (b, max_num_obj, h*w)
         # 计算对齐指标
-        # align_metric（对齐指标）为增强后的用真实的分类给这些锚点确定预测分数， overlaps为预测box和其对应真实box的iou（无效的预测box不更新）
+        # align_metric（对齐指标）为增强后的用真实的分类给这些锚点确定预测分数，使用其对应预测框的分类分数和IoU的指数加权乘积构成， overlaps为预测box和其对应真实box的iou（无效的预测box不更新）
         # align_metric -> [batchsize, max_num_obj, anchors_num], 每个元素值为这个真实标签下这个锚点的预测分数
         # overlaps -> [batchsize, max_num_obj, anchors_num]， 每个元素值为这个真实标签下这个锚框和对应真实框的iou
         align_metric, overlaps = self.get_box_metrics(pd_scores, pd_bboxes, gt_labels, gt_bboxes, mask_in_gts * mask_gt)
@@ -190,7 +190,7 @@ class TaskAlignedAssigner(nn.Module):
         # for i in range(batch_size):
         #     for j in range(max_num_obj):
         #         # 取第i个批次、所有锚点、第gt_labels.squeeze(-1)[i,j]类的预测得分
-        #         selected_scores[i,j] = pd_scores[i, :, gt_labels.squeeze(-1)[i,j]]
+        #         bbox_scores[i,j] = pd_scores[i, :, gt_labels.squeeze(-1)[i,j]]
         # 就是对于一个图片，预测中，它有最大m个类别，对于每个类别k都有na个锚框，那么这些的锚框的预测分数,可以使用对应真实类别gt_labels中第k个类别的分类l，使用这个l从预测分数pd_scores中取出
         # 就是用真实的分类给这些锚点确定预测分数（每个锚框都根据分类数nc有nc个预测分数）
         # bbox_scores --> [batchsize, max_num_obj, anchors_num] --- 可以表示为对于每张图片最多有max_num_obj个类别，每个类别有anchors_num个锚框，每个值就是这张图片的这个锚框在这个分类下的预测分数
@@ -241,7 +241,7 @@ class TaskAlignedAssigner(nn.Module):
             (Tensor): A tensor of shape (b, max_num_obj, h*w) containing the selected top-k candidates.
         """
         # (b, max_num_obj, topk)
-        # 对于每张图片的每个真实标签，只选择前self.topk个预测分数最高的锚点，同时返回他们的索引
+        # 对于每个锚框对应的真实目标分数，只选择前self.topk个预测分数最高的锚点，同时返回他们的索引
         # topk_metrics -> [batchsize, max_num_obj, topk]
         # topk_idxs -> [batchsize, max_num_obj, topk]
         topk_metrics, topk_idxs = torch.topk(metrics, self.topk, dim=-1, largest=largest)
@@ -350,7 +350,7 @@ class TaskAlignedAssigner(nn.Module):
         bbox_deltas = torch.cat((xy_centers[None] - lt, rb - xy_centers[None]), dim=2).view(bs, n_boxes, n_anchors, -1)
         # return (bbox_deltas.min(3)[0] > eps).to(gt_bboxes.dtype)
         #       (amin)          -> [batchsize, max_labels_num, anchors_num]
-        # 每个元素代表这个图片在这个真实标签下，其表示真实框位置的两个点的四个坐标值和其中一个anchor的xy差值的最小值，同时这个最小值要大于eps(最小值要是正数）
+        # 每个元素代表这个图片在这个真实标签下，其表示真实框位置的两个点的四个坐标值和其中一个anchor点的xy差值的最小值，同时这个最小值要大于eps(最小值要是正数）
         # True表示这个锚点在真实的标定框内，False为不在
         return bbox_deltas.amin(3).gt_(eps)
 
@@ -435,7 +435,7 @@ def make_anchors(feats, strides, grid_cell_offset=0.5):
     dtype, device = feats[0].dtype, feats[0].device
     for i, stride in enumerate(strides):
         h, w = feats[i].shape[2:] if isinstance(feats, list) else (int(feats[i][0]), int(feats[i][1]))
-        # 以grid_cell_offset为步长，从0到end生成一个等差数列
+        # 以1为步长，偏置為grid_cell_offset，从0到end生成一个等差数列
         sx = torch.arange(end=w, device=device, dtype=dtype) + grid_cell_offset  # shift x
         sy = torch.arange(end=h, device=device, dtype=dtype) + grid_cell_offset# shift y
         # 将sx，sy排列组合

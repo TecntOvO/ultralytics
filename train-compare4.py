@@ -5,7 +5,7 @@ if __name__ == '__main__':
     os.environ['NO_ALBUMENTATIONS_UPDATE'] = '1'
     model = YOLO(r"yolo11-compare4.yaml")
     # mask = {13: 11, 16: 14, 17: 15, 19: 17, 20:18, 22:20, 23:21}
-    mask = {16: 9, 17: 16, 19: 18, 23: 19}
+    mask = {16: 9, 17: 10, 19: 12, 23: 13}
     # mask = {16: 9, 17: 10, 19: 12, 23: 13}
     # mask = {16: 9, 17: 13, 19: 15, 23: 16}
     # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A + VoV\weights\best.pt")
@@ -13,7 +13,7 @@ if __name__ == '__main__':
 
     # model.load(r"D:\Yolov11\ultralytics\runs\detect\循序渐进改进\-P5 + 2 C3k2A  2\weights\best.pt")
     model.train(
-        data="straberry_final_enhance_balance.yaml",
+        data="straberry_final_enhance.yaml",
         epochs=150,  # number of train ing epochs
         cfg='ours.yaml',
         lr0=0.0007,
@@ -30,7 +30,6 @@ if __name__ == '__main__':
         Inner_iou=False,
         ratio=0.85,
         workers=8,
-        freeze=[0,1,2,3,4,5,6],
         # warmup_epochs=0.0,
     )
 

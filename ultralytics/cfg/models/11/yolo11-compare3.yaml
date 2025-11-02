@@ -34,9 +34,9 @@ head:
   - [-1, 2, VoVGSCSP, [512]]
 
 #  - [-1, 1, GSConv, [512, 1, 1]]
-  - [-1, 1, nn.Upsample, [None, 2, "nearest"]]
+  - [11, 1, nn.Upsample, [None, 2, "nearest"]]
   - [[-1, 4], 1, Concat, [1]] # cat backbone P3
-#  - [-1, 2, C3k2, [256, False]] # 14 (P3/8-small) 9
+#  - [-1, 2, C3k2, [256, False]] # 14(P3/8-small)
   - [-1, 2, VoVGSCSP, [256]]
 
   - [-1, 1, Conv, [256, 3, 2]]
@@ -46,4 +46,4 @@ head:
 #  - [-1, 2, C3k2, [512, False]] # 17 (P4/16-medium) 12
   - [-1, 2, VoVGSCSP, [512]]
 
-  - [[2, 14, 17], 1, Detect, [nc]] # Detect(P3, P4, P5)
+  - [[14, 17], 1, Detect, [nc]] # Detect(P3, P4, P5)

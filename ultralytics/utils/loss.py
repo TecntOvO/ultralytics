@@ -363,7 +363,17 @@ class v8DetectionLoss:
         h = model.args  # hyperparameters
 
         m = model.model[-1]  # Detect() module
-        self.bce = nn.BCEWithLogitsLoss(reduction="none")
+        # mean
+        # p_w = torch.tensor([1.38, 0.51, 3.30], device=device) # unbal
+        # p_w = torch.tensor([0.90, 0.69, 2.22], device=device)
+        # max
+        # p_w = torch.tensor([2.71, 1.00, 6.51], device=device)
+        # p_w = torch.tensor([1.31, 1.00, 3.21], device=device)
+        # officious way
+        p_w = torch.tensor([3.13, 0.52, 8.91], device=device)
+        # p_w = torch.tensor([1.71, 1.07, 5.67], device=device)
+
+        self.bce = nn.BCEWithLogitsLoss(reduction="none", pos_weight=p_w)
         self.fcl = FocalLoss()
         self.atfl = AdaptiveThresholdFocalLoss(device)
         self.hyp = h
@@ -422,6 +432,14 @@ class v8DetectionLoss:
             # pred_dist = (pred_dist.view(b, a, c // 4, 4).softmax(2) * self.proj.type(pred_dist.dtype).view(1, 1, -1, 1)).sum(2)
         return dist2bbox(pred_dist, anchor_points, xywh=False)
 
+    def varifocal_loss(self, pred_score, gt_score, label, alpha=0.75, gamma=2.0):
+        """Computes varfocal loss."""
+        weight = alpha * pred_score.sigmoid().pow(gamma) * (1 - label) + gt_score * label
+        with torch.cuda.amp.autocast(enabled=False):
+            loss = (F.binary_cross_entropy_with_logits(pred_score.float(), gt_score.float(), reduction='none') *
+                    weight).mean(1).sum()
+        return loss
+
     def __call__(self, preds, batch):
         """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
         loss_total = torch.zeros(3, device=self.device)  # box, cls, dfl
@@ -471,7 +489,7 @@ class v8DetectionLoss:
         # target_bboxes -> [bs, num_anchors, 4] 给每个锚点分配的正样本的真实框坐标
         # target_scores -> [bs, num_anchors, num_classes] 分配的类别分数
         # fg_mask -> [batchsize, num_total_anchors] 1表示有对应正样本的锚框
-        _, target_bboxes, target_scores, small_target_scores, fg_mask, small_fg_mask, _ = self.assigner(
+        target_labels, target_bboxes, target_scores, small_target_scores, fg_mask, small_fg_mask, _ = self.assigner(
             # pred_scores.detach().sigmoid() * 0.8 + dfl_conf.unsqueeze(-1) * 0.2,
             # 将预测类别分数转换为概率
             pred_scores.detach().sigmoid(),
@@ -484,11 +502,17 @@ class v8DetectionLoss:
             mask_gt,
         )
 
+        # target_labels = target_labels.unsqueeze(-1).expand(-1, -1, self.nc)  # self.nc: class num
+        # one_hot = torch.zeros(target_labels.size(), device=self.device)
+        # one_hot.scatter_(-1, target_labels, 1)
+        # target_labels = one_hot
+
         target_scores_sum = max(target_scores.sum(), 1)
         small_target_scores_sum = max(small_target_scores.sum(), 1)
 
         # Cls loss
         # loss[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum  # VFL way
+        # loss_total[1] = self.varifocal_loss(pred_scores, target_scores, target_labels) / target_scores_sum
         loss_total[1] = self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
         # loss_total[1] = self.fcl(pred_scores, target_scores.to(dtype), 1.5, 0.75).sum() / target_scores_sum
         # loss[1] = self.atfl(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum  # BCE
